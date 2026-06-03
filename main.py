@@ -1,0 +1,77 @@
+import os
+import sys
+import platform
+import ctypes
+
+os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '1'
+os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '1'
+os.environ['QT_SCALE_FACTOR'] = '1'
+
+from PyQt6.QtGui import QFont, QIcon, QPixmap
+from PyQt6.QtWidgets import QApplication, QMessageBox
+from ui_main import KoupreyBootFlashWindow
+from theme import ThemeManager
+from language import LanguageManager
+
+
+def _is_admin():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except Exception:
+        return False
+
+
+def _elevate():
+    script = os.path.abspath(sys.argv[0])
+    ctypes.windll.shell32.ShellExecuteW(
+        None, 'runas', sys.executable, f'"{script}"',
+        os.path.dirname(script), 1
+    )
+
+
+def main():
+    sys_name = platform.system()
+
+    if sys_name == 'Windows' and not _is_admin():
+        _elevate()
+        return
+
+    app = QApplication(sys.argv)
+
+    if sys_name not in ('Windows', 'Linux'):
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Icon.Critical)
+        msg.setWindowTitle('Unsupported OS')
+        msg.setText('This application supports Windows and Linux only.')
+        msg.exec()
+        return
+
+    icon_path = os.path.join(os.path.dirname(__file__), 'KoupreyTransparancy.png')
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(QPixmap(icon_path)))
+
+    app.setApplicationName('Kouprey-Boot-Flash')
+    app.setOrganizationName('Kouprey')
+
+    if sys_name == 'Linux':
+        font = QFont('Ubuntu', 11)
+        font.setFamilies(['Ubuntu', 'Noto Sans', 'sans-serif'])
+    else:
+        font = QFont('Segoe UI', 11)
+    font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+    app.setFont(font)
+
+    lang_dir = os.path.join(os.path.dirname(__file__), 'assets', 'lang')
+    lang = LanguageManager(lang_dir)
+    lang.switch_to('en')
+
+    theme_mgr = ThemeManager(app)
+    theme_mgr.set_mode('light')
+
+    window = KoupreyBootFlashWindow(lang, theme_mgr)
+    window.show()
+    sys.exit(app.exec())
+
+
+if __name__ == '__main__':
+    main()
