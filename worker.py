@@ -69,8 +69,7 @@ if loadfont $prefix/fonts/unicode.pf2; then
   terminal_output gfxterm
 fi
 
-set theme=($data_root)/themes/starfield/theme.txt
-
+insmod all_video
 insmod part_gpt
 insmod part_msdos
 insmod fat
@@ -82,8 +81,20 @@ insmod udf
 insmod loopback
 insmod search
 insmod search_fs_uuid
+insmod gfxterm_background
+insmod png
+insmod jpeg
+insmod gfxmenu
+insmod chain
+insmod boot
 
-search --set=data_root --file /THEMES
+search --no-floppy --set=data_root --file /themes/.marker
+
+if [ "$data_root" = "" ] ; then
+  search --no-floppy --set=data_root --file /themes/.marker
+fi
+
+set theme=($data_root)/themes/Vimix/theme.txt
 
 menuentry "Kouprey Boot" --class kouprey {{
   echo "Welcome to Kouprey Boot"
@@ -142,7 +153,7 @@ submenu "Boot ISO" {{
 
 submenu "Boot Windows ISO" {{
   set data_root=""
-  search --set=data_root --file /ISOS/DUMMY
+  search --no-floppy --set=data_root --file /ISOS/DUMMY
 
   if [ "$data_root" != "" ] ; then
     for iso in $data_root/ISOS/*.iso $data_root/ISOS/*.ISO ; do
@@ -156,6 +167,30 @@ submenu "Boot Windows ISO" {{
       fi
     done
   fi
+}}
+
+submenu "Boot local OS" {{
+  menuentry "Windows (from local disk)" {{
+    insmod chain
+    insmod ntfs
+    insmod part_gpt
+    search --no-floppy --set=windev --file /Windows/System32/winload.efi
+    if [ "$windev" != "" ] ; then
+      chainloader ($windev)/EFI/Microsoft/Boot/bootmgfw.efi
+    else
+      echo "Windows not found on any partition"
+    fi
+  }}
+
+  menuentry "EFI file chainloader" {{
+    insmod chain
+    echo "Enter EFI file path (e.g. (hd0,gpt1)/EFI/BOOT/BOOTX64.EFI)"
+  }}
+
+  menuentry "Boot from partition" {{
+    insmod chain
+    echo "Select partition in the next menu"
+  }}
 }}
 
 submenu "Advanced" {{
@@ -378,37 +413,24 @@ Write-Output "DATA=$dataDrive"
         if not ok:
             return False
 
-        self._log('Step 6: Creating ISOs directory and THEMES marker...')
+        self._log('Step 6: Creating ISOs directory and GRUB marker...')
         import time
         iso_dir = os.path.join(data_drive, 'ISOS')
         os.makedirs(iso_dir, exist_ok=True)
+        dummy_path = os.path.join(iso_dir, 'DUMMY')
+        if not os.path.isfile(dummy_path):
+            with open(dummy_path, 'w', encoding='utf-8') as f:
+                f.write('# Kouprey Boot ISO directory marker\n')
         self._log(f'Created {iso_dir}')
         themes_dir = os.path.join(data_drive, 'themes')
         os.makedirs(themes_dir, exist_ok=True)
-        themes_marker = os.path.join(data_drive, 'THEMES')
-        for attempt in range(10):
-            try:
-                with open(themes_marker, 'w', encoding='utf-8') as f:
-                    f.write('# Kouprey Boot theme directory marker\n')
-                break
-            except PermissionError:
-                if attempt < 9:
-                    time.sleep(1)
-                else:
-                    self._log(f'Warning: retries exhausted for {themes_marker}, trying cmd.exe fallback...')
-                    try:
-                        subprocess.run(
-                            ['cmd', '/c', f'echo. > "{themes_marker}"'],
-                            capture_output=True, timeout=5,
-                            creationflags=subprocess.CREATE_NO_WINDOW,
-                        )
-                        if os.path.exists(themes_marker):
-                            self._log('THEMES marker created via cmd.exe fallback')
-                        else:
-                            self._log(f'Warning: could not create THEMES marker (GRUB needs this file)')
-                    except Exception:
-                        self._log(f'Warning: could not create THEMES marker')
-        self._log(f'THEMES: {themes_marker}')
+        marker_path = os.path.join(themes_dir, '.marker')
+        with open(marker_path, 'w', encoding='utf-8') as f:
+            f.write('# Kouprey Boot theme directory marker\n')
+        if os.path.isfile(marker_path):
+            self._log(f'GRUB marker created: {marker_path} ({os.path.getsize(marker_path)} bytes)')
+        else:
+            self._log(f'Warning: could not create GRUB marker (GRUB needs this file)')
         self._log(f'Created {themes_dir}')
 
         self._log('Step 7: Writing grub.cfg...')
@@ -442,7 +464,7 @@ Write-Output "DATA=$dataDrive"
 
         dest_efi = os.path.join(esp_drive, 'EFI', 'BOOT')
         dest_grub = os.path.join(esp_drive, 'grub')
-        dest_themes = os.path.join(esp_drive, 'themes')
+        dest_themes = os.path.join(data_drive, 'themes')
 
         os.makedirs(dest_efi, exist_ok=True)
         os.makedirs(dest_grub, exist_ok=True)
@@ -484,6 +506,16 @@ Write-Output "DATA=$dataDrive"
                 shutil.rmtree(dest_themes)
             shutil.copytree(theme_src, dest_themes)
 
+        old_marker = os.path.join(data_drive, 'THEMES')
+        if os.path.isfile(old_marker):
+            os.remove(old_marker)
+            self._log(f'Removed old THEMES marker (now using themes/.marker)')
+
+        marker_path = os.path.join(dest_themes, '.marker')
+        if not os.path.isfile(marker_path):
+            with open(marker_path, 'w', encoding='utf-8') as f:
+                f.write('# Kouprey Boot GRUB data partition marker\n')
+
         self._log('GRUB2 installed successfully')
         return True
 
@@ -504,8 +536,8 @@ class DeployWorker(QThread):
     def __init__(self, disk_number: int, mount_point: str, data_mount_point: str, grub_dir: str, options: dict):
         super().__init__()
         self._disk = disk_number
-        self._mount = mount_point.rstrip('\\')
-        self._data_mount = data_mount_point.rstrip('\\') if data_mount_point else self._mount
+        self._mount = mount_point if mount_point.endswith('\\') else mount_point + '\\' if mount_point else ''
+        self._data_mount = (data_mount_point if data_mount_point.endswith('\\') else data_mount_point + '\\') if data_mount_point else self._mount
         self._grub_dir = grub_dir
         self._options = options
         self._log_path = ''
@@ -542,6 +574,17 @@ class DeployWorker(QThread):
     def run(self):
         self._log_path = _create_log_file('deploy')
         self._log(f'Deploy starting. Log: {self._log_path}')
+
+        if platform.system() == 'Windows':
+            try:
+                import ctypes
+                if not ctypes.windll.shell32.IsUserAnAdmin():
+                    self._log('Administrator privileges required.')
+                    self.finished.emit(False, 'Administrator privileges required. Please run the app as Administrator.')
+                    return
+            except Exception:
+                pass
+
         try:
             theme_name = self._options.get('theme')
             if theme_name and self._options.get('theme_path'):
@@ -554,12 +597,21 @@ class DeployWorker(QThread):
                 if not esp_mount_path:
                     raise Exception('Could not access ESP partition')
 
-                theme_dest = os.path.join(self._data_mount, 'themes', theme_name)
-                os.makedirs(os.path.join(self._data_mount, 'themes'), exist_ok=True)
-                marker = os.path.join(self._data_mount, 'THEMES')
-                if not os.path.exists(marker):
+                themes_root = os.path.join(self._data_mount, 'themes')
+                old_marker = os.path.join(self._data_mount, 'THEMES')
+                if os.path.isfile(old_marker):
+                    os.remove(old_marker)
+                    self._log('Removed old THEMES marker file')
+                if os.path.isfile(themes_root):
+                    os.remove(themes_root)
+                    self._log('Removed file blocking themes/ directory')
+                os.makedirs(themes_root, exist_ok=True)
+                marker = os.path.join(themes_root, '.marker')
+                if not os.path.isfile(marker):
                     with open(marker, 'w', encoding='utf-8') as f:
-                        f.write('# Kouprey Boot theme directory marker\n')
+                        f.write('# Kouprey Boot GRUB data partition marker\n')
+
+                theme_dest = os.path.join(themes_root, theme_name)
                 if os.path.isdir(theme_dest):
                     shutil.rmtree(theme_dest)
                 shutil.copytree(self._options['theme_path'], theme_dest)
@@ -574,16 +626,23 @@ class DeployWorker(QThread):
                         self._log('Theme already set in grub.cfg')
                     else:
                         import re
-                        cfg = re.sub(
+                        new_cfg = re.sub(
                             r'^set\s+theme\s*=\s*\S+.*$',
                             new_line,
                             cfg,
                             count=1,
                             flags=re.MULTILINE,
                         )
+                        if new_cfg == cfg:
+                            self._log('Warning: could not find theme line in grub.cfg, appending')
+                            cfg = cfg.rstrip('\n') + '\n' + new_line + '\n'
+                        else:
+                            cfg = new_cfg
                         with open(cfg_path, 'w', encoding='utf-8') as f:
                             f.write(cfg)
                         self._log('grub.cfg theme updated')
+                else:
+                    self._log(f'Warning: grub.cfg not found at {cfg_path}')
 
             self.finished.emit(True, f'Deployment complete!\nLog: {self._log_path}')
 
