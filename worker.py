@@ -109,7 +109,7 @@ submenu "Boot ISO" {{
   fi
 
   if [ "$data_root" != "" ] ; then
-    for iso in $data_root/ISOS/*.iso $data_root/ISOS/*.ISO ; do
+    for iso in ($data_root)/ISOS/*.iso ($data_root)/ISOS/*.ISO ; do
       if [ -f "$iso" ] ; then
         menuentry "${{iso##*/}}" --class iso {{
           loopback loop "$iso"
@@ -152,7 +152,7 @@ submenu "Boot Windows ISO" {{
   search --no-floppy --set=data_root --file /ISOS/DUMMY
 
   if [ "$data_root" != "" ] ; then
-    for iso in $data_root/ISOS/*.iso $data_root/ISOS/*.ISO ; do
+    for iso in ($data_root)/ISOS/*.iso ($data_root)/ISOS/*.ISO ; do
       if [ -f "$iso" ] ; then
         menuentry "${{iso##*/}}" --class windows {{
           loopback loop "$iso"
@@ -466,6 +466,18 @@ Write-Output "DATA=$dataDrive"
             for fname in os.listdir(font_src):
                 shutil.copy2(os.path.join(font_src, fname),
                              os.path.join(font_dst, fname))
+
+        self._log(f'Copying default theme (Vimix)...')
+        theme_src = os.path.join(src, 'themes', 'Vimix')
+        if os.path.isdir(theme_src):
+            for fname in os.listdir(theme_src):
+                s = os.path.join(theme_src, fname)
+                d = os.path.join(dest_themes, fname)
+                if os.path.isdir(s):
+                    shutil.copytree(s, d, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(s, d)
+            self._log(f'Default theme copied to {dest_themes}')
 
         old_marker = os.path.join(data_drive, 'THEMES')
         if os.path.isfile(old_marker):
