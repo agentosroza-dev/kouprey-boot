@@ -7,7 +7,7 @@ os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '1'
 os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '1'
 os.environ['QT_SCALE_FACTOR'] = '1'
 
-from PyQt6.QtGui import QFont, QIcon, QPixmap
+from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import QApplication, QMessageBox
 from ui_main import KoupreyBootFlashWindow
 from theme import ThemeManager
@@ -46,9 +46,11 @@ def main():
         msg.exec()
         return
 
-    icon_path = os.path.join(os.path.dirname(__file__), 'KoupreyTransparancy.png')
-    if os.path.exists(icon_path):
-        app.setWindowIcon(QIcon(QPixmap(icon_path)))
+    base = os.path.dirname(__file__)
+    png_path = os.path.join(base, 'KoupreyTransparancy.png')
+    if os.path.exists(png_path):
+        icon = QIcon(png_path)
+        app.setWindowIcon(icon)
 
     app.setApplicationName('Kouprey-Boot-Flash')
     app.setOrganizationName('Kouprey')

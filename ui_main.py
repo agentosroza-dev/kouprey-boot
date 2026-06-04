@@ -7,7 +7,20 @@ from PyQt6.QtWidgets import (
     QScrollArea, QGroupBox, QListWidget, QListWidgetItem,
     QSizePolicy, QSpinBox,
 )
-from PyQt6.QtCore import Qt, QTimer, QSize
+
+_shared_main_win = None
+
+def _get_main_window():
+    if _shared_main_win is not None:
+        return _shared_main_win
+    app = QApplication.instance()
+    if not app:
+        return None
+    for w in app.topLevelWidgets():
+        if isinstance(w, QMainWindow):
+            return w
+    return None
+from PyQt6.QtCore import Qt, QTimer, QSize, pyqtSignal
 from PyQt6.QtGui import QFont, QPixmap, QIcon
 
 from icons import lucide_icon
@@ -28,6 +41,8 @@ PAGES = [
 
 
 class DriveCard(QFrame):
+    flash_requested = pyqtSignal(object)
+
     def __init__(self, drive: DriveInfo, parent=None):
         super().__init__(parent)
         self.setObjectName('card')
@@ -109,6 +124,7 @@ class DriveCard(QFrame):
         btn_flash.setObjectName('btn_accent')
         btn_flash.setFixedHeight(32)
         btn_flash.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_flash.clicked.connect(lambda: self.flash_requested.emit(self.drive))
         actions.addWidget(btn_flash)
         layout.addLayout(actions)
 
@@ -117,6 +133,8 @@ class DriveCard(QFrame):
 
 
 class DashboardPage(QWidget):
+    flash_requested = pyqtSignal(object)
+
     def __init__(self, lang, parent=None):
         super().__init__(parent)
         self._lang = lang
@@ -141,7 +159,7 @@ class DashboardPage(QWidget):
         top_row.setSpacing(10)
         top_row.addStretch()
         self._refresh_btn = QPushButton(self._lang.get('btn_refresh'))
-        self._refresh_btn.setIcon(lucide_icon('refresh-cw', 16, '#000000'))
+        self._refresh_btn.setIcon(lucide_icon('refresh-cw', 16, '#616161'))
         self._refresh_btn.setFixedWidth(120)
         self._refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         top_row.addWidget(self._refresh_btn)
@@ -185,8 +203,12 @@ class DashboardPage(QWidget):
 
         for d in drives:
             card = DriveCard(d)
+            card.flash_requested.connect(self.flash_requested.emit)
             self._cards.append(card)
             self._card_area.addWidget(card)
+
+    def set_icon_color(self, color: str):
+        self._refresh_btn.setIcon(lucide_icon('refresh-cw', 16, color))
 
     def first_drive(self):
         if hasattr(self, '_last_drives') and self._last_drives:
@@ -244,19 +266,6 @@ class FlashPage(QWidget):
         fs_layout.addWidget(self._file_system)
         options_row.addLayout(fs_layout)
 
-        persist_layout = QVBoxLayout()
-        persist_layout.setSpacing(4)
-        persist_label = QLabel('Persistence (GB)')
-        persist_label.setStyleSheet('font-size: 9pt; color: #616161; background: transparent;')
-        persist_layout.addWidget(persist_label)
-        self._persist_spin = QSpinBox()
-        self._persist_spin.setRange(0, 64)
-        self._persist_spin.setValue(8)
-        self._persist_spin.setSuffix(' GB')
-        self._persist_spin.setFixedWidth(100)
-        persist_layout.addWidget(self._persist_spin)
-        options_row.addLayout(persist_layout)
-
         options_row.addStretch()
         card_layout.addLayout(options_row)
 
@@ -269,10 +278,18 @@ class FlashPage(QWidget):
         btn_row.addStretch()
         card_layout.addLayout(btn_row)
 
+        progress_row = QHBoxLayout()
+        progress_row.setSpacing(10)
         self._progress = QProgressBar()
         self._progress.setVisible(False)
-        self._progress.setFixedHeight(6)
-        card_layout.addWidget(self._progress)
+        self._progress.setFixedHeight(12)
+        self._progress.setTextVisible(False)
+        progress_row.addWidget(self._progress, 1)
+        self._progress_label = QLabel('')
+        self._progress_label.setStyleSheet('font-size: 9pt; color: #616161; background: transparent;')
+        self._progress_label.setVisible(False)
+        progress_row.addWidget(self._progress_label)
+        card_layout.addLayout(progress_row)
 
         layout.addWidget(card)
 
@@ -308,11 +325,13 @@ class FlashPage(QWidget):
             f'{drive.model} ({drive.size_gb}) \u2013 Disk #{drive.number}'
             + (f' \u2013 {drive.mount_point}' if drive.mount_point else '')
         )
-        self._drive_info.setText(
-            'Ready to flash' if not drive.has_kouprey
-            else 'Kouprey Boot is already installed.'
-        )
-        self._btn_flash.setEnabled(not drive.has_kouprey)
+        if drive.has_kouprey:
+            self._drive_info.setText('Kouprey Boot is installed. Reflash to erase and reinstall.')
+            self._btn_flash.setText('\u26a1 Reflash')
+        else:
+            self._drive_info.setText('Ready to flash')
+            self._btn_flash.setText('\u26a1 Flash')
+        self._btn_flash.setEnabled(True)
 
     def _log(self, msg: str):
         lbl = QLabel(msg)
@@ -337,23 +356,26 @@ class FlashPage(QWidget):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        self._start()
+        QTimer.singleShot(0, self._start)
+
+    _progress_steps = 0
 
     def _start(self):
         self._btn_flash.setEnabled(False)
         self._progress.setVisible(True)
+        self._progress_label.setVisible(True)
         self._progress.setValue(0)
+        self._progress_label.setText('0% - Starting...')
+        self.__class__._progress_steps = 0
 
         for i in reversed(range(self._log_area.count())):
             w = self._log_area.itemAt(i).widget()
             if w:
                 w.setParent(None)
 
-        persist_mb = self._persist_spin.value() * 1024
         self._worker = create_flash_worker(
             self._drive.number,
             file_system=self._file_system.currentData(),
-            persistence_size_mb=persist_mb,
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.log.connect(self._log)
@@ -361,12 +383,17 @@ class FlashPage(QWidget):
         self._worker.start()
 
     def _on_progress(self, msg: str):
-        self._progress.setValue(min(self._progress.value() + 15, 85))
+        self._progress_steps += 1
+        pct = min(int(self._progress_steps * 12), 90)
+        self._progress.setValue(pct)
+        self._progress_label.setText(f'{pct}% - {msg}')
 
     def _on_finished(self, ok: bool, msg: str):
         self._btn_flash.setEnabled(True)
         self._progress.setValue(100 if ok else 0)
-        QTimer.singleShot(1500, lambda: self._progress.setVisible(False))
+        self._progress_label.setText('100% - Complete' if ok else f'Failed - {msg}')
+        QTimer.singleShot(3000, lambda: self._progress_label.setVisible(False))
+        QTimer.singleShot(3000, lambda: self._progress.setVisible(False))
 
         if ok:
             from scanner import list_usb_drives
@@ -440,10 +467,18 @@ class DeployPage(QWidget):
         self._btn_deploy.setFixedHeight(38)
         layout.addWidget(self._btn_deploy)
 
+        progress_row = QHBoxLayout()
+        progress_row.setSpacing(10)
         self._progress = QProgressBar()
         self._progress.setVisible(False)
-        self._progress.setFixedHeight(6)
-        layout.addWidget(self._progress)
+        self._progress.setFixedHeight(12)
+        self._progress.setTextVisible(False)
+        progress_row.addWidget(self._progress, 1)
+        self._progress_label = QLabel('')
+        self._progress_label.setStyleSheet('font-size: 9pt; color: #616161; background: transparent;')
+        self._progress_label.setVisible(False)
+        progress_row.addWidget(self._progress_label)
+        layout.addLayout(progress_row)
 
         log_card = QFrame()
         log_card.setObjectName('card')
@@ -523,8 +558,12 @@ class DeployPage(QWidget):
         lbl.setWordWrap(True)
         self._log_area.addWidget(lbl)
 
+    _deploy_steps = 0
+
     def _on_deploy(self):
-        if not self._drive or not self._drive.mount_point:
+        data_mp = getattr(self._drive, 'data_mount_point', '')
+        esp_mp = getattr(self._drive, 'mount_point', '')
+        if not self._drive or not (esp_mp or data_mp):
             QMessageBox.warning(self, '', self._lang.get('deploy_select'))
             return
 
@@ -536,24 +575,34 @@ class DeployPage(QWidget):
 
         self._btn_deploy.setEnabled(False)
         self._progress.setVisible(True)
+        self._progress_label.setVisible(True)
         self._progress.setValue(0)
+        self._progress_label.setText('0% - Starting...')
+        self.__class__._deploy_steps = 0
 
         for i in reversed(range(self._log_area.count())):
             w = self._log_area.itemAt(i).widget()
             if w:
                 w.setParent(None)
 
-        self._worker = DeployWorker(self._drive.mount_point, self._grub_dir, opts)
-        self._worker.progress.connect(lambda m: self._progress.setValue(
-            min(self._progress.value() + 20, 85)))
+        self._worker = DeployWorker(self._drive.number, esp_mp, data_mp, self._grub_dir, opts)
+        self._worker.progress.connect(self._on_deploy_progress)
         self._worker.log.connect(self._log)
-        self._worker.finished.connect(self._on_finished)
+        self._worker.finished.connect(self._on_deploy_finished)
         self._worker.start()
 
-    def _on_finished(self, ok: bool, msg: str):
+    def _on_deploy_progress(self, msg: str):
+        self._deploy_steps += 1
+        pct = min(int(self._deploy_steps * 25), 85)
+        self._progress.setValue(pct)
+        self._progress_label.setText(f'{pct}% - {msg}')
+
+    def _on_deploy_finished(self, ok: bool, msg: str):
         self._btn_deploy.setEnabled(True)
         self._progress.setValue(100 if ok else 0)
-        QTimer.singleShot(1500, lambda: self._progress.setVisible(False))
+        self._progress_label.setText('100% - Complete' if ok else f'Failed - {msg}')
+        QTimer.singleShot(3000, lambda: self._progress_label.setVisible(False))
+        QTimer.singleShot(3000, lambda: self._progress.setVisible(False))
         if ok:
             QMessageBox.information(self, self._lang.get('success'), msg)
         else:
@@ -561,6 +610,8 @@ class DeployPage(QWidget):
 
 
 class SettingsPage(QWidget):
+    language_changed = pyqtSignal(str)
+
     def __init__(self, lang, theme_mgr, parent=None):
         super().__init__(parent)
         self._lang = lang
@@ -638,7 +689,16 @@ class SettingsPage(QWidget):
         self._grub_version.setText(f'GRUB2 v{version}' if version else 'GRUB2 v2.14')
 
     def _on_lang(self, idx):
-        pass
+        code = self._lang_combo.currentData()
+        if code and code != self._lang.current_lang:
+            self.language_changed.emit(code)
+
+    def set_theme_mode(self, mode: str):
+        idx = self._theme_combo.findData(mode)
+        if idx >= 0:
+            self._theme_combo.blockSignals(True)
+            self._theme_combo.setCurrentIndex(idx)
+            self._theme_combo.blockSignals(False)
 
     def _on_theme(self, idx):
         if self._theme_mgr:
@@ -652,6 +712,9 @@ class KoupreyBootFlashWindow(QMainWindow):
         self._theme_mgr = theme_mgr
         self._theme_colors = LIGHT_COLORS
         self._current_page = 'dashboard'
+
+        global _shared_main_win
+        _shared_main_win = self
 
         self.setWindowTitle(lang.get('app_title'))
         self.setMinimumSize(900, 640)
@@ -702,13 +765,15 @@ class KoupreyBootFlashWindow(QMainWindow):
         layout.addSpacing(20)
 
         self._nav_btns = {}
+        self._nav_icon_map = {}
         for pid, picon, plang_key in PAGES:
             btn = QPushButton(self._lang.get(plang_key))
             btn.setObjectName('btn_nav')
             btn.setCheckable(True)
             btn.setChecked(pid == 'dashboard')
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setIcon(lucide_icon(picon, 18, '#000000'))
+            btn.setIcon(lucide_icon(picon, 18, self._current_text_color()))
+            btn._icon_name = picon
             btn.clicked.connect(lambda checked, p=pid: self._switch_page(p))
             self._nav_btns[pid] = btn
             layout.addWidget(btn)
@@ -756,9 +821,13 @@ class KoupreyBootFlashWindow(QMainWindow):
         self._stack = QStackedWidget()
 
         self._dash_page = DashboardPage(self._lang)
+        self._dash_page.flash_requested.connect(self._on_drive_flash_requested)
         self._flash_page = FlashPage(self._lang)
+        self._flash_page._main_win = self
         self._deploy_page = DeployPage(self._lang)
+        self._deploy_page._main_win = self
         self._settings_page = SettingsPage(self._lang, self._theme_mgr)
+        self._settings_page.language_changed.connect(self._on_settings_lang_changed)
 
         self._deploy_page._themes_dir = self._themes_dir
         self._settings_page.set_info(
@@ -788,6 +857,10 @@ class KoupreyBootFlashWindow(QMainWindow):
 
         self._btn_lang.clicked.connect(self._on_toggle_lang)
         self._btn_theme.clicked.connect(self._on_toggle_theme)
+
+    def _on_drive_flash_requested(self, drive):
+        self._flash_page.set_drive(drive)
+        self._switch_page('flash')
 
     def _switch_page(self, page_id: str):
         self._current_page = page_id
@@ -823,6 +896,13 @@ class KoupreyBootFlashWindow(QMainWindow):
         c = self._theme_colors
         return c.TextPrimary if c else '#000000'
 
+    def _update_nav_icons(self):
+        c = self._current_text_color()
+        for btn in self._nav_btns.values():
+            name = getattr(btn, '_icon_name', '')
+            if name:
+                btn.setIcon(lucide_icon(name, 18, c))
+
     def _update_theme_icon(self):
         dark = self._theme_mgr and self._theme_mgr.get_mode() == 'dark'
         c = self._current_text_color()
@@ -832,6 +912,9 @@ class KoupreyBootFlashWindow(QMainWindow):
         else:
             self._btn_theme.setIcon(lucide_icon('sun', 18, c))
             self._btn_theme.setToolTip(self._lang.get('theme_tooltip_light'))
+        self._update_nav_icons()
+        if hasattr(self, '_dash_page'):
+            self._dash_page.set_icon_color(c)
 
     def _update_logo(self):
         dark = self._theme_mgr and self._theme_mgr.get_mode() == 'dark'
@@ -859,14 +942,22 @@ class KoupreyBootFlashWindow(QMainWindow):
         n = lang.get('english') if lang.current_lang == 'en' else lang.get('khmer')
         self._btn_lang.setToolTip(lang.get('lang_tooltip').format(lang=n))
 
+    def _on_settings_lang_changed(self, code: str):
+        self._lang.switch_to(code)
+        self._apply_lang_font(code)
+        self._retranslate_ui()
+
+    def _apply_lang_font(self, code: str):
+        app = QApplication.instance()
+        if app:
+            f = QFont('Leelawadee UI' if code == 'km' else 'Segoe UI', 11)
+            f.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+            app.setFont(f)
+
     def _on_toggle_lang(self):
         nl = 'km' if self._lang.current_lang == 'en' else 'en'
         self._lang.switch_to(nl)
-        app = QApplication.instance()
-        if app:
-            f = QFont('Leelawadee UI' if nl == 'km' else 'Segoe UI', 11)
-            f.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
-            app.setFont(f)
+        self._apply_lang_font(nl)
         self._retranslate_ui()
 
     def _on_toggle_theme(self):
@@ -874,7 +965,9 @@ class KoupreyBootFlashWindow(QMainWindow):
             return
         self._theme_mgr.toggle()
         dark = self._theme_mgr.get_mode() == 'dark'
+        mode = 'dark' if dark else 'light'
         self._theme_colors = DARK_COLORS if dark else LIGHT_COLORS
+        self._settings_page.set_theme_mode(mode)
         self._update_theme_icon()
         self._update_logo()
         c = self._current_text_color()

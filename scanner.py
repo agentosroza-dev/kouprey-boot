@@ -38,6 +38,7 @@ class DriveInfo:
         has_kouprey: bool = False,
         mount_point: str = '',
         device_path: str = '',
+        data_mount_point: str = '',
     ):
         self.number = number
         self.model = model
@@ -47,6 +48,7 @@ class DriveInfo:
         self.has_kouprey = has_kouprey
         self.mount_point = mount_point
         self.device_path = device_path
+        self.data_mount_point = data_mount_point
 
     @property
     def size_gb(self) -> str:
@@ -131,6 +133,7 @@ def _detect_windows_drives() -> list[DriveInfo]:
     foreach ($disk in $drives) {
         $parts = Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue
         $mount = ""
+        $dataMount = ""
         $kouprey = $false
         $checked = $false
         foreach ($part in $parts) {
@@ -138,14 +141,15 @@ def _detect_windows_drives() -> list[DriveInfo]:
             if ($vol.DriveLetter) {
                 $checked = $true
                 $mp = $vol.DriveLetter + ":\\"
-                if ((Test-Path ($mp + "EFI\\BOOT\\BOOTX64.EFI")) -or
-                    (Test-Path ($mp + "EFI\\BOOT\\grub.cfg")) -or
-                    (Test-Path ($mp + "grub\\x86_64-efi\\normal.mod"))) {
+                if ((Test-Path ($mp + "ISOS")) -or (Test-Path ($mp + "themes")) -or (Test-Path ($mp + "THEMES"))) {
                     $kouprey = $true
+                    $dataMount = $mp
+                } elseif ($vol.FileSystemLabel -eq "KoupreyData") {
+                    $kouprey = $true
+                    $dataMount = $mp
+                } elseif (-not $mount) {
                     $mount = $mp
-                    break
                 }
-                if (-not $mount) { $mount = $mp }
             }
         }
         if (-not $checked) { $kouprey = $true }
@@ -156,6 +160,7 @@ def _detect_windows_drives() -> list[DriveInfo]:
             Removable = $disk.IsRemovable
             BusType = $disk.BusType.ToString()
             MountPoint = $mount
+            DataMountPoint = $dataMount
             HasKouprey = $kouprey
         }
     }
@@ -183,6 +188,7 @@ def _detect_windows_drives() -> list[DriveInfo]:
             is_usb=item.get('BusType') == 'USB',
             has_kouprey=item.get('HasKouprey', False),
             mount_point=item.get('MountPoint', ''),
+            data_mount_point=item.get('DataMountPoint', ''),
             device_path=f'\\\\.\\PhysicalDrive{num}',
         ))
     return drives
@@ -269,16 +275,22 @@ def _parse_lsblk_size(size_str: str) -> int:
         return 0
 
 
-def find_ventoy_directory(base_dir: str) -> Optional[str]:
-    return None
-
-
-def get_ventoy_version(ventoy_dir: str) -> Optional[str]:
-    return '2.14'
-
-
 def get_platform_name() -> str:
     return platform.system()
+
+
+def _theme_pack_name(root: str, themes_dir: str) -> str:
+    rel = os.path.relpath(root, themes_dir)
+    parts = rel.split(os.sep)
+    if len(parts) >= 1:
+        name = parts[0]
+        for suffix in ('-ventoy-theme', '-theme', '-ventoy'):
+            if name.lower().endswith(suffix):
+                name = name[:-len(suffix)]
+                break
+        words = name.replace('_', ' ').replace('-', ' ').split()
+        return ' '.join(w.capitalize() for w in words)
+    return os.path.basename(root)
 
 
 def list_available_themes(themes_dir: str) -> list[ThemeInfo]:
@@ -290,7 +302,7 @@ def list_available_themes(themes_dir: str) -> list[ThemeInfo]:
         for root, dirs, files in os.walk(themes_dir):
             if 'theme.txt' not in files:
                 continue
-            name = os.path.basename(root)
+            name = _theme_pack_name(root, themes_dir)
             if name in seen:
                 continue
             seen.add(name)
@@ -305,22 +317,4 @@ def list_available_themes(themes_dir: str) -> list[ThemeInfo]:
     return _cached('themes', _fetch, ttl=5)
 
 
-def scan_iso_files(base_dir: str) -> list[str]:
-    def _fetch():
-        isos = []
-        skip = {'.opencode', 'lucide', 'assets', '__pycache__', '.git', 'node_modules'}
-        for root, dirs, files in os.walk(base_dir):
-            dirs[:] = [d for d in dirs if d not in skip and not d.startswith('.') and d not in ('__pycache__',)]
-            for f in files:
-                if f.lower().endswith('.iso'):
-                    isos.append(os.path.join(root, f))
-        return isos
-    return _cached('isos', _fetch, ttl=5)
 
-
-def get_ventoy_json_path(ventoy_dir: str) -> Optional[str]:
-    return None
-
-
-def read_ventoy_json(ventoy_dir: str) -> Optional[dict]:
-    return None

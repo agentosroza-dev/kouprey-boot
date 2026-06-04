@@ -2,82 +2,60 @@ import os
 import sys
 import subprocess
 import shutil
-import json
 import platform
-import time
-import threading
+import tempfile
+import datetime
 
 from PyQt6.QtCore import QThread, pyqtSignal
+
+
+def _create_log_file(prefix: str) -> str:
+    log_dir = os.path.join(tempfile.gettempdir(), 'kouprey-boot')
+    os.makedirs(log_dir, exist_ok=True)
+    ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    return os.path.join(log_dir, f'{prefix}_{ts}.log')
 
 
 _base = getattr(sys, '_MEIPASS', os.path.dirname(__file__))
 GRUB_SRC = os.path.join(_base, 'assets', 'grub')
 
 
-def _run_powershell(script: str, timeout: int = 30) -> str:
+def _run_diskpart(commands: list[str], disk: int, timeout: int = 30) -> tuple[str, int]:
+    try:
+        script_lines = [f'select disk {disk}'] + commands
+        script_text = '\r\n'.join(script_lines) + '\r\nexit\r\n'
+        spath = os.path.join(tempfile.gettempdir(), f'dpart_{disk}.txt')
+        with open(spath, 'w', encoding='ascii') as f:
+            f.write(script_text)
+        result = subprocess.run(
+            ['diskpart', '/s', spath],
+            capture_output=True, text=True, timeout=timeout,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        os.remove(spath)
+        return result.stdout.strip(), result.returncode
+    except subprocess.TimeoutExpired:
+        return 'diskpart timed out', -1
+    except Exception as e:
+        return f'diskpart error: {e}', -1
+
+
+def _run_powershell(script: str, timeout: int = 30) -> tuple[str, int]:
     try:
         result = subprocess.run(
             ['powershell', '-NoProfile', '-Command', script],
             capture_output=True, text=True, timeout=timeout,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return ''
-
-
-def _hide_windows_by_pid(pid, timeout=10):
-    try:
-        import ctypes
-        from ctypes import wintypes
-        user32 = ctypes.windll.user32
-        WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-        def enum_callback(hwnd, _lparam):
-            wp = wintypes.DWORD()
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(wp))
-            if wp.value == pid:
-                user32.ShowWindow(hwnd, 0)
-            return True
-        callback = WNDENUMPROC(enum_callback)
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            user32.EnumWindows(callback, 0)
-            time.sleep(0.3)
-    except Exception:
-        pass
-
-
-def _run_process(args, log_callback, progress_callback, hide_window=False, stdin_data=''):
-    kwargs = dict(
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-    if platform.system() == 'Windows':
-        kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
-
-    proc = subprocess.Popen(args, **kwargs)
-
-    if hide_window and platform.system() == 'Windows':
-        threading.Thread(target=_hide_windows_by_pid, args=(proc.pid,), daemon=True).start()
-
-    if stdin_data:
-        threading.Thread(
-            target=lambda: (proc.stdin.write(stdin_data), proc.stdin.close()),
-            daemon=True,
-        ).start()
-
-    for line in iter(proc.stdout.readline, ''):
-        line = line.strip()
-        if not line:
-            continue
-        log_callback(line)
-    proc.wait()
-    return proc.returncode
+        out = result.stdout.strip()
+        if result.returncode != 0 and result.stderr.strip():
+            combined = out + '\n' + result.stderr.strip() if out else result.stderr.strip()
+            return combined, result.returncode
+        return out, result.returncode
+    except subprocess.TimeoutExpired:
+        return 'Command timed out', -1
+    except Exception as e:
+        return f'Process error: {e}', -1
 
 
 def _grub_cfg_content(data_part_uuid: str = '', persist_uuid: str = '') -> str:
@@ -91,7 +69,7 @@ if loadfont $prefix/fonts/unicode.pf2; then
   terminal_output gfxterm
 fi
 
-set theme=$prefix/themes/starfield/theme.txt
+set theme=($data_root)/themes/starfield/theme.txt
 
 insmod part_gpt
 insmod part_msdos
@@ -104,6 +82,8 @@ insmod udf
 insmod loopback
 insmod search
 insmod search_fs_uuid
+
+search --set=data_root --file /THEMES
 
 menuentry "Kouprey Boot" --class kouprey {{
   echo "Welcome to Kouprey Boot"
@@ -200,171 +180,255 @@ def _build_grub_cfg(data_part_uuid: str = '', persist_uuid: str = '') -> str:
     return _grub_cfg_content(data_part_uuid, persist_uuid)
 
 
-def _get_grub_dir() -> str:
-    return GRUB_SRC
-
-
-def find_grub_directory() -> str:
-    if os.path.isdir(GRUB_SRC):
-        return GRUB_SRC
-    return ''
-
-
-def get_grub_version() -> str:
-    return '2.14'
-
-
-def get_platform_name() -> str:
-    return platform.system()
-
-
-def check_usb_has_grub(mount_point: str) -> bool:
-    efi_path = os.path.join(mount_point, 'EFI', 'BOOT', 'BOOTX64.EFI')
-    return os.path.isfile(efi_path)
-
-
 class KoupreyFlashWorker(QThread):
     progress = pyqtSignal(str)
     finished = pyqtSignal(bool, str)
     log = pyqtSignal(str)
 
-    def __init__(self, disk_number: int, file_system: str = 'exfat',
-                 persistence_size_mb: int = 0):
+    def __init__(self, disk_number: int, file_system: str = 'exfat'):
         super().__init__()
         self._disk_number = disk_number
         self._file_system = file_system
-        self._persist_mb = persistence_size_mb
-        self._grub_src = _get_grub_dir()
+        self._grub_src = GRUB_SRC
+        self._last_error = ''
+        self._log_path = ''
+
+    def _log(self, msg: str):
+        self.log.emit(msg)
+        if self._log_path:
+            ts = datetime.datetime.now().strftime('%H:%M:%S')
+            try:
+                with open(self._log_path, 'a', encoding='utf-8') as f:
+                    f.write(f'[{ts}] {msg}\n')
+            except Exception:
+                pass
 
     def run(self):
+        self._log_path = _create_log_file('flash')
+        self._log(f'Kouprey Boot flash starting on disk #{self._disk_number}')
+        self._log(f'Log file: {self._log_path}')
+        self.progress.emit('Preparing disk...')
+
         sys_name = platform.system()
         try:
-            self.log.emit(f'Kouprey Boot flash starting on disk #{self._disk_number}')
-            self.progress.emit('Preparing disk...')
 
             if sys_name == 'Windows':
                 ok = self._flash_windows()
             else:
-                self.log.emit('Linux support coming soon')
+                self._log('Linux support coming soon')
                 ok = False
 
             if ok:
                 self.progress.emit('Kouprey Boot installed successfully!')
-                self.finished.emit(True, 'Kouprey Boot has been installed on the USB drive.')
+                self._log('Kouprey Boot installed successfully!')
+                self.finished.emit(True, f'Kouprey Boot installed. Log: {self._log_path}')
             else:
-                self.finished.emit(False, 'Flash failed — check the log for details.')
+                err = self._last_error or 'Unknown error'
+                self._log(f'Flash failed: {err}')
+                self.finished.emit(False, f'Flash failed: {err}\nLog: {self._log_path}')
         except Exception as e:
+            self._log(f'Exception: {e}')
             self.finished.emit(False, str(e))
 
     def _flash_windows(self) -> bool:
         disk = self._disk_number
         fs = self._file_system
-        pmb = self._persist_mb
 
-        self.log.emit(f'Step 1: Clearing disk #{disk}...')
+        if platform.system() == 'Windows':
+            try:
+                import ctypes
+                if not ctypes.windll.shell32.IsUserAnAdmin():
+                    self._last_error = 'Administrator privileges required. Please run the app as Administrator.'
+                    self._log(self._last_error)
+                    return False
+            except Exception:
+                self._last_error = 'Could not check admin privileges.'
+                self._log(self._last_error)
+                return False
+
+        self._log(f'Step 1: Clearing disk #{disk}...')
         script = f'''
 $disk = Get-Disk -Number {disk} -ErrorAction SilentlyContinue
 if (-not $disk) {{ Write-Error "Disk #{disk} not found"; exit 1 }}
-Clear-Disk -Number {disk} -RemoveData -RemoveOEM -Confirm:$false -ErrorAction Stop
+
+# Ensure disk is writable and online
+Set-Disk -Number {disk} -IsOffline $false -ErrorAction SilentlyContinue
+Set-Disk -Number {disk} -IsReadOnly $false -ErrorAction SilentlyContinue
+
+# Try Clear-Disk first (failsafe if volumes are mounted)
+$clearOk = $true
+try {{
+    Clear-Disk -Number {disk} -RemoveData -RemoveOEM -Confirm:$false -ErrorAction Stop
+}} catch {{
+    $clearOk = $false
+}}
+
+if (-not $clearOk) {{
+    # Fallback: use diskpart for stubborn disks
+    $scriptPath = "$env:TEMP\\clean_disk_{disk}.txt"
+    "select disk {disk}`nclean`nconvert gpt" | Out-File -FilePath $scriptPath -Encoding ascii
+    & diskpart /s $scriptPath | Out-Null
+    Remove-Item $scriptPath -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+}}
+
+$disk | Update-Disk -ErrorAction SilentlyContinue
+Set-Disk -Number {disk} -IsOffline $false -ErrorAction SilentlyContinue
+Set-Disk -Number {disk} -IsReadOnly $false -ErrorAction SilentlyContinue
 Write-Output "Disk cleared"
 '''
-        out = _run_powershell(script, timeout=60)
-        if 'Error' in out:
-            self.log.emit(f'Clear-Disk failed: {out}')
+        out, rc = _run_powershell(script, timeout=60)
+        if rc != 0 or 'Error' in out:
+            self._last_error = out or 'Clear-Disk failed (disk may be in use)'
+            self._log(f'Clear-Disk failed: {self._last_error}')
             return False
-        self.log.emit('Disk cleared')
+        self._log('Disk cleared')
 
-        self.log.emit('Step 2: Initializing GPT...')
+        self._log('Step 2: Initializing GPT...')
         script = f'''
-Initialize-Disk -Number {disk} -PartitionStyle GPT -Confirm:$false -ErrorAction Stop
+$disk = Get-Disk -Number {disk} -ErrorAction SilentlyContinue
+if (-not $disk) {{ Write-Error "Disk #{disk} not found"; exit 1 }}
+$disk | Update-Disk -ErrorAction SilentlyContinue
+Set-Disk -Number {disk} -IsOffline $false -ErrorAction SilentlyContinue
+Set-Disk -Number {disk} -IsReadOnly $false -ErrorAction SilentlyContinue
+if ($disk.PartitionStyle -eq 'RAW') {{
+    Initialize-Disk -Number {disk} -PartitionStyle GPT -Confirm:$false -ErrorAction Stop
+}} elseif ($disk.PartitionStyle -eq 'MBR') {{
+    $sp = "$env:TEMP\\convert_gpt_{disk}.txt"
+    "select disk {disk}`nclean`nconvert gpt" | Out-File -FilePath $sp -Encoding ascii
+    & diskpart /s $sp | Out-Null
+    Remove-Item $sp -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+}}
 Write-Output "GPT initialized"
 '''
-        out = _run_powershell(script, timeout=30)
-        if 'Error' in out:
-            self.log.emit(f'Initialize-Disk failed: {out}')
+        out, rc = _run_powershell(script, timeout=30)
+        if rc != 0 or 'Error' in out:
+            self._last_error = out or 'Initialize-Disk failed'
+            self._log(f'Initialize-Disk failed: {self._last_error}')
             return False
-        self.log.emit('GPT partition table created')
+        self._log('GPT partition table created')
         self.progress.emit('Creating partitions...')
 
-        self.log.emit('Step 3: Creating ESP (512 MB FAT32)...')
-        script = f'''
-$esp = New-Partition -DiskNumber {disk} -Size 512MB -IsActive -ErrorAction Stop
-$esp | Format-Volume -FileSystem FAT32 -NewFileSystemLabel "Kouprey Boot" -Confirm:$false -ErrorAction Stop
-$espDrive = ($esp | Get-Volume).DriveLetter + ":\\"
-Write-Output "ESP=$espDrive"
+        self._log('Step 3: Creating ESP (512 MB FAT32)...')
+        out, rc = _run_diskpart(['create partition efi size=512'], disk, timeout=60)
+        if rc != 0:
+            self._last_error = out or 'ESP partition creation failed'
+            self._log(f'ESP partition creation failed: {self._last_error}')
+            return False
+        self._log('ESP partition created, formatting...')
+
+        esp_mount = os.path.join(tempfile.gettempdir(), 'kp_esp')
+        os.makedirs(esp_mount, exist_ok=True)
+        ps_format = f'''
+$part = Get-Partition -DiskNumber {disk} | Where-Object {{ $_.Type -eq "EFI" -or $_.GptType -eq "{{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}}" }} | Select-Object -First 1
+if (-not $part) {{ $part = Get-Partition -DiskNumber {disk} | Sort-Object PartitionNumber | Select-Object -First 1 }}
+$part | Format-Volume -FileSystem FAT32 -NewFileSystemLabel "KoupreyBoot" -Confirm:$false -ErrorAction Stop
+Add-PartitionAccessPath -DiskNumber {disk} -PartitionNumber $part.PartitionNumber -AccessPath "{esp_mount}" -ErrorAction Stop
+Write-Output "ESP={esp_mount}"
 '''
-        out = _run_powershell(script, timeout=60)
-        if 'Error' in out or 'ESP=' not in out:
-            self.log.emit(f'ESP creation failed: {out}')
+        out, rc = _run_powershell(ps_format, timeout=60)
+        if rc != 0 or 'Error' in out or 'ESP=' not in out:
+            self._last_error = out or 'ESP creation failed'
+            self._log(f'ESP creation failed: {self._last_error}')
             return False
         esp_drive = ''
         for line in out.split('\n'):
             if line.startswith('ESP='):
                 esp_drive = line.split('=', 1)[1].strip()
                 break
-        self.log.emit(f'ESP created at {esp_drive}')
+        self._log('ESP mounted to folder (hidden from Explorer)')
         self.progress.emit('ESP created...')
 
-        self.log.emit('Step 4: Creating DATA partition...')
-        if pmb > 0:
-            script = f'''
-$data = New-Partition -DiskNumber {disk} -UseMaximumSize -ErrorAction Stop
-Write-Output "DATA_PART=$($data.PartitionNumber)"
-'''
-        else:
-            script = f'''
-$data = New-Partition -DiskNumber {disk} -UseMaximumSize -ErrorAction Stop
-Write-Output "DATA_PART=$($data.PartitionNumber)"
-'''
-        out = _run_powershell(script, timeout=30)
-        if 'Error' in out:
-            self.log.emit(f'DATA partition creation failed: {out}')
+        self._log('Step 4: Creating DATA partition...')
+        out, rc = _run_diskpart(['create partition primary'], disk, timeout=60)
+        if rc != 0:
+            self._last_error = out or 'DATA partition creation failed'
+            self._log(f'DATA partition creation failed: {self._last_error}')
             return False
-        self.progress.emit('Formatting DATA...')
+        self._log('DATA partition created, formatting...')
 
         fs_map = {'exfat': 'EXFAT', 'ntfs': 'NTFS', 'fat32': 'FAT32'}
         fs_arg = fs_map.get(fs, 'EXFAT')
-        script = f'''
-$dataVol = Get-Partition -DiskNumber {disk} -PartitionNumber 2 -ErrorAction Stop
-$dataVol | Format-Volume -FileSystem {fs_arg} -NewFileSystemLabel "Kouprey Data" -Confirm:$false -ErrorAction Stop
-$dataDrive = ($dataVol | Get-Volume).DriveLetter + ":\\"
+        ps_format = f'''
+$part = Get-Partition -DiskNumber {disk} | Sort-Object PartitionNumber -Descending | Select-Object -First 1
+$part | Format-Volume -FileSystem {fs_arg} -NewFileSystemLabel "KoupreyData" -Confirm:$false -ErrorAction Stop
+$used = (Get-Volume).DriveLetter | Where-Object {{ $_ }}
+$tChar = if ($used -notcontains 'T') {{ 'T' }} else {{ 90..68 | ForEach-Object {{ [char]$_ }} | Where-Object {{ $_ -notin $used }} | Select-Object -First 1 }}
+Set-Partition -DiskNumber {disk} -PartitionNumber $part.PartitionNumber -NewDriveLetter $tChar -ErrorAction Stop
+$dataDrive = $tChar + ":\\"
 Write-Output "DATA=$dataDrive"
 '''
-        out = _run_powershell(script, timeout=120)
-        if 'Error' in out or 'DATA=' not in out:
-            self.log.emit(f'DATA format failed: {out}')
+        out, rc = _run_powershell(ps_format, timeout=120)
+        if rc != 0 or 'Error' in out or 'DATA=' not in out:
+            self._last_error = out or 'DATA format failed'
+            self._log(f'DATA format failed: {self._last_error}')
             return False
         data_drive = ''
         for line in out.split('\n'):
             if line.startswith('DATA='):
                 data_drive = line.split('=', 1)[1].strip()
                 break
-        self.log.emit(f'DATA formatted at {data_drive}')
+        self._log(f'DATA formatted at {data_drive}')
         self.progress.emit('Formatting done...')
 
-        if pmb > 0:
-            self.log.emit(f'Step 5: Creating PERSIST partition ({pmb} MB ext4)...')
-            self.log.emit('Persistence partition requires manual ext4 formatting on Windows')
-            self.progress.emit('Persistence not supported on Windows (ext4)')
-
-        self.log.emit('Step 6: Installing GRUB2...')
+        self._log('Step 5: Installing GRUB2...')
         self.progress.emit('Installing GRUB2...')
         ok = self._install_grub(esp_drive, data_drive)
         if not ok:
             return False
 
-        self.log.emit('Step 7: Creating ISOs directory...')
+        self._log('Step 6: Creating ISOs directory and THEMES marker...')
+        import time
         iso_dir = os.path.join(data_drive, 'ISOS')
         os.makedirs(iso_dir, exist_ok=True)
-        self.log.emit(f'Created {iso_dir}')
+        self._log(f'Created {iso_dir}')
+        themes_dir = os.path.join(data_drive, 'themes')
+        os.makedirs(themes_dir, exist_ok=True)
+        themes_marker = os.path.join(data_drive, 'THEMES')
+        for attempt in range(10):
+            try:
+                with open(themes_marker, 'w', encoding='utf-8') as f:
+                    f.write('# Kouprey Boot theme directory marker\n')
+                break
+            except PermissionError:
+                if attempt < 9:
+                    time.sleep(1)
+                else:
+                    self._log(f'Warning: retries exhausted for {themes_marker}, trying cmd.exe fallback...')
+                    try:
+                        subprocess.run(
+                            ['cmd', '/c', f'echo. > "{themes_marker}"'],
+                            capture_output=True, timeout=5,
+                            creationflags=subprocess.CREATE_NO_WINDOW,
+                        )
+                        if os.path.exists(themes_marker):
+                            self._log('THEMES marker created via cmd.exe fallback')
+                        else:
+                            self._log(f'Warning: could not create THEMES marker (GRUB needs this file)')
+                    except Exception:
+                        self._log(f'Warning: could not create THEMES marker')
+        self._log(f'THEMES: {themes_marker}')
+        self._log(f'Created {themes_dir}')
 
-        self.log.emit('Step 8: Writing grub.cfg...')
+        self._log('Step 7: Writing grub.cfg...')
         cfg_content = _build_grub_cfg()
         cfg_path = os.path.join(esp_drive, 'EFI', 'BOOT', 'grub.cfg')
         os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
         with open(cfg_path, 'w', encoding='utf-8') as f:
             f.write(cfg_content)
-        self.log.emit('grub.cfg written')
+        self._log('grub.cfg written')
+
+        self._log('Step 8: Removing ESP mount (hidden from Windows)...')
+        if os.path.exists(esp_mount):
+            out1, rc1 = _run_powershell(f'Remove-PartitionAccessPath -DiskNumber {disk} -PartitionNumber 1 -AccessPath "{esp_mount}" -ErrorAction Stop', timeout=15)
+            if rc1 != 0:
+                subprocess.run(['mountvol', esp_mount, '/d'], capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+            try:
+                os.rmdir(esp_mount)
+            except Exception:
+                pass
+        self._log('ESP mount removed (hidden from Windows Explorer)')
 
         self.progress.emit('Installation complete!')
         return True
@@ -372,7 +436,8 @@ Write-Output "DATA=$dataDrive"
     def _install_grub(self, esp_drive: str, data_drive: str) -> bool:
         src = self._grub_src
         if not src or not os.path.isdir(src):
-            self.log.emit(f'GRUB source not found at {src}')
+            self._last_error = f'GRUB source not found at {src}'
+            self._log(self._last_error)
             return False
 
         dest_efi = os.path.join(esp_drive, 'EFI', 'BOOT')
@@ -383,16 +448,16 @@ Write-Output "DATA=$dataDrive"
         os.makedirs(dest_grub, exist_ok=True)
         os.makedirs(dest_themes, exist_ok=True)
 
-        self.log.emit(f'Copying BOOTX64.EFI...')
+        self._log(f'Copying BOOTX64.EFI...')
         shutil.copy2(os.path.join(src, 'EFI', 'BOOT', 'BOOTX64.EFI'),
                      os.path.join(dest_efi, 'BOOTX64.EFI'))
 
-        self.log.emit(f'Copying wimboot...')
+        self._log(f'Copying wimboot...')
         wimboot_src = os.path.join(src, 'EFI', 'BOOT', 'wimboot')
         if os.path.isfile(wimboot_src):
             shutil.copy2(wimboot_src, os.path.join(dest_efi, 'wimboot'))
 
-        self.log.emit(f'Copying GRUB2 modules...')
+        self._log(f'Copying GRUB2 modules...')
         mod_src = os.path.join(src, 'grub', 'x86_64-efi')
         if os.path.isdir(mod_src):
             mod_dst = os.path.join(dest_grub, 'x86_64-efi')
@@ -401,9 +466,9 @@ Write-Output "DATA=$dataDrive"
                 if fname.endswith('.mod'):
                     shutil.copy2(os.path.join(mod_src, fname),
                                  os.path.join(mod_dst, fname))
-            self.log.emit(f'Modules copied ({len(os.listdir(mod_dst))} files)')
+            self._log(f'Modules copied ({len(os.listdir(mod_dst))} files)')
 
-        self.log.emit(f'Copying fonts...')
+        self._log(f'Copying fonts...')
         font_src = os.path.join(src, 'grub', 'fonts')
         if os.path.isdir(font_src):
             font_dst = os.path.join(dest_grub, 'fonts')
@@ -412,24 +477,23 @@ Write-Output "DATA=$dataDrive"
                 shutil.copy2(os.path.join(font_src, fname),
                              os.path.join(font_dst, fname))
 
-        self.log.emit(f'Copying themes...')
+        self._log(f'Copying themes...')
         theme_src = os.path.join(src, 'themes')
         if os.path.isdir(theme_src):
             if os.path.isdir(dest_themes):
                 shutil.rmtree(dest_themes)
             shutil.copytree(theme_src, dest_themes)
 
-        self.log.emit('GRUB2 installed successfully')
+        self._log('GRUB2 installed successfully')
         return True
 
     def _flash_linux(self) -> bool:
-        self.log.emit('Linux flash not yet implemented')
+        self._log('Linux flash not yet implemented')
         return False
 
 
-def create_flash_worker(disk_number: int, file_system: str = 'exfat',
-                        persistence_size_mb: int = 0):
-    return KoupreyFlashWorker(disk_number, file_system, persistence_size_mb)
+def create_flash_worker(disk_number: int, file_system: str = 'exfat'):
+    return KoupreyFlashWorker(disk_number, file_system)
 
 
 class DeployWorker(QThread):
@@ -437,47 +501,94 @@ class DeployWorker(QThread):
     finished = pyqtSignal(bool, str)
     log = pyqtSignal(str)
 
-    def __init__(self, mount_point: str, grub_dir: str, options: dict):
+    def __init__(self, disk_number: int, mount_point: str, data_mount_point: str, grub_dir: str, options: dict):
         super().__init__()
+        self._disk = disk_number
         self._mount = mount_point.rstrip('\\')
+        self._data_mount = data_mount_point.rstrip('\\') if data_mount_point else self._mount
         self._grub_dir = grub_dir
         self._options = options
+        self._log_path = ''
+        self._esp_mount = ''
+
+    def _log(self, msg: str):
+        self.log.emit(msg)
+        if self._log_path:
+            ts = datetime.datetime.now().strftime('%H:%M:%S')
+            try:
+                with open(self._log_path, 'a', encoding='utf-8') as f:
+                    f.write(f'[{ts}] {msg}\n')
+            except Exception:
+                pass
+
+    def _mount_esp(self) -> str:
+        self._esp_mount = os.path.join(tempfile.gettempdir(), 'kp_esp_d')
+        os.makedirs(self._esp_mount, exist_ok=True)
+        ps = f'Add-PartitionAccessPath -DiskNumber {self._disk} -PartitionNumber 1 -AccessPath "{self._esp_mount}" -ErrorAction Stop'
+        out, rc = _run_powershell(ps, timeout=15)
+        if rc == 0:
+            return self._esp_mount
+        return ''
+
+    def _unmount_esp(self):
+        if self._esp_mount and os.path.exists(self._esp_mount):
+            _run_powershell(f'Remove-PartitionAccessPath -DiskNumber {self._disk} -PartitionNumber 1 -AccessPath "{self._esp_mount}" -ErrorAction Stop', timeout=10)
+            try:
+                os.rmdir(self._esp_mount)
+            except Exception:
+                pass
+            self._esp_mount = ''
 
     def run(self):
+        self._log_path = _create_log_file('deploy')
+        self._log(f'Deploy starting. Log: {self._log_path}')
         try:
             theme_name = self._options.get('theme')
             if theme_name and self._options.get('theme_path'):
                 self.progress.emit(f'Applying theme: {theme_name}...')
-                esp_path = None
-                for chk in ('EFI\\BOOT\\grub.cfg', 'EFI/BOOT/grub.cfg'):
-                    p = os.path.join(self._mount, chk)
-                    if os.path.isfile(p):
-                        esp_path = os.path.dirname(p)
-                        break
-                if not esp_path:
-                    esp_path = os.path.join(self._mount, 'EFI', 'BOOT')
-                    os.makedirs(esp_path, exist_ok=True)
 
-                theme_dest = os.path.join(esp_path, '..', '..', 'themes', theme_name)
-                theme_dest = os.path.normpath(theme_dest)
+                esp_mount_path = self._mount_esp()
+                if not esp_mount_path and self._mount:
+                    esp_mount_path = self._mount
+
+                if not esp_mount_path:
+                    raise Exception('Could not access ESP partition')
+
+                theme_dest = os.path.join(self._data_mount, 'themes', theme_name)
+                os.makedirs(os.path.join(self._data_mount, 'themes'), exist_ok=True)
+                marker = os.path.join(self._data_mount, 'THEMES')
+                if not os.path.exists(marker):
+                    with open(marker, 'w', encoding='utf-8') as f:
+                        f.write('# Kouprey Boot theme directory marker\n')
                 if os.path.isdir(theme_dest):
                     shutil.rmtree(theme_dest)
                 shutil.copytree(self._options['theme_path'], theme_dest)
-                self.log.emit(f'Theme "{theme_name}" deployed to {theme_dest}')
+                self._log(f'Theme "{theme_name}" deployed to {theme_dest}')
 
-                cfg_path = os.path.join(esp_path, 'grub.cfg')
+                cfg_path = os.path.join(esp_mount_path, 'EFI', 'BOOT', 'grub.cfg')
                 if os.path.isfile(cfg_path):
                     with open(cfg_path, 'r', encoding='utf-8') as f:
                         cfg = f.read()
-                    old = 'set theme=$prefix/themes/starfield/theme.txt'
-                    new = f'set theme=$prefix/themes/{theme_name}/theme.txt'
-                    if old in cfg:
-                        cfg = cfg.replace(old, new)
+                    new_line = f'set theme=($data_root)/themes/{theme_name}/theme.txt'
+                    if new_line in cfg:
+                        self._log('Theme already set in grub.cfg')
+                    else:
+                        import re
+                        cfg = re.sub(
+                            r'^set\s+theme\s*=\s*\S+.*$',
+                            new_line,
+                            cfg,
+                            count=1,
+                            flags=re.MULTILINE,
+                        )
                         with open(cfg_path, 'w', encoding='utf-8') as f:
                             f.write(cfg)
-                        self.log.emit('grub.cfg theme updated')
+                        self._log('grub.cfg theme updated')
 
-            self.finished.emit(True, 'Deployment complete!')
+            self.finished.emit(True, f'Deployment complete!\nLog: {self._log_path}')
 
         except Exception as e:
-            self.finished.emit(False, str(e))
+            self._log(f'Exception: {e}')
+            self.finished.emit(False, f'{e}\nLog: {self._log_path}')
+        finally:
+            self._unmount_esp()
