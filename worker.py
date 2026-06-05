@@ -592,6 +592,14 @@ Write-Output "PART=$($part.PartitionNumber)"
         else:
             self._log('Warning: core.img.xz not found')
 
+        self._log(f'Copying wimboot to ESP root...')
+        wimboot_src = os.path.join(self._grub_src, 'grub', 'wimboot', 'wimboot.x86_64.xz')
+        if os.path.isfile(wimboot_src):
+            shutil.copy2(wimboot_src, os.path.join(esp_drive, 'wimboot'))
+            self._log('wimboot copied to ESP root')
+        else:
+            self._log('Warning: wimboot.x86_64.xz not found')
+
         self._log(f'Copying default theme (Vimix)...')
         theme_src = os.path.join(_base, 'themes', 'Vimix-theme', 'themes')
         if os.path.isdir(theme_src):
@@ -632,7 +640,7 @@ Write-Output "PART=$($part.PartitionNumber)"
             safe_name = fname.replace('"', '\\"')
             entries.append(
                 f'menuentry "Boot {safe_name}" --class iso {{\n'
-                f'    boot_iso "($data_root)/ISOS/{safe_name}"\n'
+                f'    boot_iso "($data_root)" "/ISOS/{safe_name}"\n'
                 f'}}'
             )
         with open(menu_path, 'w', encoding='utf-8') as f:

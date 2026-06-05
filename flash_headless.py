@@ -213,7 +213,8 @@ def do_gen_iso_menu(disk_number):
         return False
 
     from worker import KoupreyFlashWorker
-    KoupreyFlashWorker._generate_iso_menu(data_drive.rstrip('\\'))
+    data_path = data_drive if data_drive.endswith('\\') else data_drive + '\\'
+    KoupreyFlashWorker._generate_iso_menu(data_path)
     print(f'OK: ISO menu regenerated on {data_drive}')
     return True
 
