@@ -5,6 +5,8 @@ import shutil
 import platform
 import tempfile
 import datetime
+import lzma
+import time
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -18,6 +20,7 @@ def _create_log_file(prefix: str) -> str:
 
 _base = getattr(sys, '_MEIPASS', os.path.dirname(__file__))
 GRUB_SRC = os.path.join(_base, 'assets', 'grub')
+BOOT_SRC = os.path.join(_base, 'assets', 'boot')
 
 
 def _run_diskpart(commands: list[str], disk: int, timeout: int = 30) -> tuple[str, int]:
@@ -58,129 +61,92 @@ def _run_powershell(script: str, timeout: int = 30) -> tuple[str, int]:
         return f'Process error: {e}', -1
 
 
-def _grub_cfg_content(data_part_uuid: str = '', persist_uuid: str = '') -> str:
-    return f'''set default=0
-set timeout=30
-set gfxmode=auto
-set gfxpayload=keep
-
-if loadfont $prefix/fonts/unicode.pf2; then
-  set gfxmode=auto
-  terminal_output gfxterm
-fi
-
-insmod all_video
-insmod part_gpt
-insmod part_msdos
-insmod fat
-insmod exfat
-insmod ntfs
-insmod ext2
-insmod iso9660
-insmod udf
-insmod loopback
-insmod search
-insmod search_fs_uuid
-insmod gfxterm_background
-insmod png
-insmod jpeg
-insmod gfxmenu
-insmod chain
-insmod boot
-
-search --no-floppy --set=data_root --file /themes/.marker
-
-if [ "$data_root" = "" ] ; then
-  search --no-floppy --set=data_root --file /themes/.marker
-fi
-
-set theme=($data_root)/themes/theme.txt
-
-submenu "Boot ISO" {{
-  set data_root=""
-  search --set=data_root --file /ISOS/DUMMY
-
-  if [ "$data_root" = "" ] ; then
-    search --set=data_root --file /ISOS/DUMMY
-  fi
-
-  if [ "$data_root" = "" ] ; then
-    search --set=data_root --file /ISOS/DUMMY  
-  fi
-
-  if [ "$data_root" != "" ] ; then
-    for iso in ($data_root)/ISOS/*.iso ($data_root)/ISOS/*.ISO ; do
-      if [ -f "$iso" ] ; then
-        menuentry "${{iso##*/}}" --class iso {{
-          loopback loop "$iso"
-          if [ -f (loop)/casper/vmlinuz ]; then
-            linux (loop)/casper/vmlinuz boot=casper iso-scan/filename="$iso" quiet splash ---
-            initrd (loop)/casper/initrd
-          elif [ -f (loop)/casper/vmlinuz.efi ]; then
-            linux (loop)/casper/vmlinuz.efi boot=casper iso-scan/filename="$iso" quiet splash ---
-            initrd (loop)/casper/initrd
-          elif [ -f (loop)/live/vmlinuz ]; then
-            linux (loop)/live/vmlinuz boot=live findiso="$iso" quiet splash ---
-            initrd (loop)/live/initrd.img
-          elif [ -f (loop)/live/vmlinuz64 ]; then
-            linux (loop)/live/vmlinuz64 boot=live findiso="$iso" quiet splash ---
-            initrd (loop)/live/initrd64.img
-          elif [ -f (loop)/install/vmlinuz ]; then
-            linux (loop)/install/vmlinuz iso-scan/filename="$iso" quiet ---
-            initrd (loop)/install/initrd.gz
-          elif [ -f (loop)/images/pxeboot/vmlinuz ]; then
-            linux (loop)/images/pxeboot/vmlinuz iso-scan/filename="$iso" quiet ---
-            initrd (loop)/images/pxeboot/initrd.img
-          elif [ -f (loop)/isolinux/vmlinuz ]; then
-            linux (loop)/isolinux/vmlinuz iso-scan/filename="$iso" quiet ---
-            initrd (loop)/isolinux/initrd.img
-          else
-            echo "Unknown ISO type: $iso"
-          fi
-        }}
-      fi
-    done
-  fi
-
-  menuentry "Rescan ISOs" {{
-    configfile $prefix/grub.cfg
-  }}
-}}
-
-submenu "Boot Windows ISO" {{
-  set data_root=""
-  search --no-floppy --set=data_root --file /ISOS/DUMMY
-
-  if [ "$data_root" != "" ] ; then
-    for iso in ($data_root)/ISOS/*.iso ($data_root)/ISOS/*.ISO ; do
-      if [ -f "$iso" ] ; then
-        menuentry "${{iso##*/}}" --class windows {{
-          loopback loop "$iso"
-          insmod ntfs
-          insmod chain
-          ntboot --efi=$prefix/wimboot "$iso"
-        }}
-      fi
-    done
-  fi
-}}
-
-submenu "Advanced" {{
-  menuentry "Reboot" {{
-    reboot
-  }}
-  menuentry "Shutdown" {{
-    halt
-  }}
-  menuentry "EFI Firmware Setup" {{
-    fwsetup
-  }}
-}}
-'''
+def _open_disk(disk_number: int):
+    import ctypes
+    handle = ctypes.windll.kernel32.CreateFileW(
+        f'\\\\.\\PhysicalDrive{disk_number}',
+        0xC0000000,
+        0x00000003,
+        None, 3,
+        0x80, None,
+    )
+    if handle == -1 or handle is None:
+        raise RuntimeError(f'Cannot open PhysicalDrive{disk_number}')
+    return handle
 
 
-def _build_grub_cfg(data_part_uuid: str = '', persist_uuid: str = '') -> str:
-    return _grub_cfg_content(data_part_uuid, persist_uuid)
+def _close_disk(handle):
+    import ctypes
+    ctypes.windll.kernel32.CloseHandle(handle)
+
+
+def _seek_disk(handle, byte_offset: int):
+    import ctypes
+    ctypes.windll.kernel32.SetFilePointerEx(handle, ctypes.c_longlong(byte_offset), None, 0)
+
+
+def _read_raw_disk(disk_number: int, size: int, byte_offset: int = 0) -> bytes:
+    import ctypes
+    handle = _open_disk(disk_number)
+    try:
+        _seek_disk(handle, byte_offset)
+        buf = ctypes.create_string_buffer(size)
+        read = ctypes.c_ulong(0)
+        ctypes.windll.kernel32.ReadFile(handle, buf, size, ctypes.byref(read), None)
+        return buf.raw[:read.value]
+    finally:
+        _close_disk(handle)
+
+
+def _write_raw_disk(disk_number: int, data: bytes, byte_offset: int = 0):
+    import ctypes
+    handle = _open_disk(disk_number)
+    try:
+        _seek_disk(handle, byte_offset)
+        written = ctypes.c_ulong(0)
+        ok = ctypes.windll.kernel32.WriteFile(handle, data, len(data), ctypes.byref(written), None)
+        if not ok:
+            raise RuntimeError(f'WriteFile failed on PhysicalDrive{disk_number} at offset {byte_offset}')
+    finally:
+        _close_disk(handle)
+
+
+def _suppress_format_dialogs():
+    """Disable Windows automount & AutoPlay to suppress format/AutoPlay dialogs during flash."""
+    _run_diskpart(['automount disable'], 0, timeout=10)
+    _run_powershell('Stop-Service ShellHWDetection -Force -ErrorAction SilentlyContinue', timeout=5)
+    time.sleep(0.3)
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r'Software\Microsoft\Windows\CurrentVersion\Policies\Explorer',
+            0, winreg.KEY_SET_VALUE | winreg.KEY_READ,
+        )
+        winreg.SetValueEx(key, 'NoDriveTypeAutoRun', 0, winreg.REG_DWORD, 0xFF)
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+
+
+def _restore_format_dialogs():
+    """Re-enable Windows automount and restore AutoPlay after flash."""
+    _run_diskpart(['automount enable'], 0, timeout=10)
+    _run_powershell('Start-Service ShellHWDetection -ErrorAction SilentlyContinue', timeout=10)
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r'Software\Microsoft\Windows\CurrentVersion\Policies\Explorer',
+            0, winreg.KEY_SET_VALUE | winreg.KEY_READ,
+        )
+        try:
+            winreg.DeleteValue(key, 'NoDriveTypeAutoRun')
+        except FileNotFoundError:
+            pass
+        winreg.CloseKey(key)
+    except Exception:
+        pass
 
 
 class KoupreyFlashWorker(QThread):
@@ -188,10 +154,11 @@ class KoupreyFlashWorker(QThread):
     finished = pyqtSignal(bool, str)
     log = pyqtSignal(str)
 
-    def __init__(self, disk_number: int, file_system: str = 'exfat'):
+    def __init__(self, disk_number: int, file_system: str = 'exfat', include_rescue: bool = False):
         super().__init__()
         self._disk_number = disk_number
         self._file_system = file_system
+        self._include_rescue = include_rescue
         self._grub_src = GRUB_SRC
         self._last_error = ''
         self._log_path = ''
@@ -214,7 +181,6 @@ class KoupreyFlashWorker(QThread):
 
         sys_name = platform.system()
         try:
-
             if sys_name == 'Windows':
                 ok = self._flash_windows()
             else:
@@ -232,6 +198,9 @@ class KoupreyFlashWorker(QThread):
         except Exception as e:
             self._log(f'Exception: {e}')
             self.finished.emit(False, str(e))
+        finally:
+            _restore_format_dialogs()
+            self._log('Windows automount and AutoPlay restored')
 
     def _flash_windows(self) -> bool:
         disk = self._disk_number
@@ -248,6 +217,9 @@ class KoupreyFlashWorker(QThread):
                 self._last_error = 'Could not check admin privileges.'
                 self._log(self._last_error)
                 return False
+
+        self._log('Suppressing Windows automount and AutoPlay to hide format dialogs...')
+        _suppress_format_dialogs()
 
         self._log(f'Step 1: Clearing disk #{disk}...')
         script = f'''
@@ -313,50 +285,34 @@ Write-Output "GPT initialized"
         self._log('GPT partition table created')
         self.progress.emit('Creating partitions...')
 
-        self._log('Step 3: Creating ESP (512 MB FAT32)...')
-        out, rc = _run_diskpart(['create partition efi size=512'], disk, timeout=60)
-        if rc != 0:
-            self._last_error = out or 'ESP partition creation failed'
-            self._log(f'ESP partition creation failed: {self._last_error}')
-            return False
-        self._log('ESP partition created, formatting...')
-
-        esp_mount = os.path.join(tempfile.gettempdir(), 'kp_esp')
-        os.makedirs(esp_mount, exist_ok=True)
-        ps_format = f'''
-$part = Get-Partition -DiskNumber {disk} | Where-Object {{ $_.Type -eq "EFI" -or $_.GptType -eq "{{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}}" }} | Select-Object -First 1
-if (-not $part) {{ $part = Get-Partition -DiskNumber {disk} | Sort-Object PartitionNumber | Select-Object -First 1 }}
-$part | Format-Volume -FileSystem FAT32 -NewFileSystemLabel "KoupreyBoot" -Confirm:$false -ErrorAction Stop
-Add-PartitionAccessPath -DiskNumber {disk} -PartitionNumber $part.PartitionNumber -AccessPath "{esp_mount}" -ErrorAction Stop
-Write-Output "ESP={esp_mount}"
-'''
-        out, rc = _run_powershell(ps_format, timeout=60)
-        if rc != 0 or 'Error' in out or 'ESP=' not in out:
-            self._last_error = out or 'ESP creation failed'
-            self._log(f'ESP creation failed: {self._last_error}')
-            return False
-        esp_drive = ''
-        for line in out.split('\n'):
-            if line.startswith('ESP='):
-                esp_drive = line.split('=', 1)[1].strip()
-                break
-        self._log('ESP mounted to folder (hidden from Explorer)')
-        self.progress.emit('ESP created...')
-
-        self._log('Step 4: Creating DATA partition...')
+        self._log('Step 3: Creating DATA partition (Ventoy partition 1)...')
         out, rc = _run_diskpart(['create partition primary'], disk, timeout=60)
         if rc != 0:
             self._last_error = out or 'DATA partition creation failed'
             self._log(f'DATA partition creation failed: {self._last_error}')
             return False
-        self._log('DATA partition created, formatting...')
+        self._log('DATA partition created, shrinking to make room for ESP + BIOS Boot...')
+
+        ps_shrink = f'''
+$part = Get-Partition -DiskNumber {disk} | Sort-Object PartitionNumber | Select-Object -First 1
+$newSize = $part.Size - 70MB
+Resize-Partition -DiskNumber {disk} -PartitionNumber $part.PartitionNumber -Size $newSize -ErrorAction Stop
+Set-Partition -DiskNumber {disk} -PartitionNumber $part.PartitionNumber -NoDefaultDriveLetter $true -ErrorAction SilentlyContinue
+Write-Output "SHRINK=ok"
+'''
+        out, rc = _run_powershell(ps_shrink, timeout=30)
+        if rc != 0 or 'Error' in out:
+            self._last_error = out or 'Shrink DATA partition failed'
+            self._log(f'Shrink DATA partition failed: {self._last_error}')
+            return False
+        self._log('DATA partition shrunk (freed 70 MB)')
 
         fs_map = {'exfat': 'EXFAT', 'ntfs': 'NTFS', 'fat32': 'FAT32'}
         fs_arg = fs_map.get(fs, 'EXFAT')
         ps_format = f'''
-$part = Get-Partition -DiskNumber {disk} | Sort-Object PartitionNumber -Descending | Select-Object -First 1
-$part | Format-Volume -FileSystem {fs_arg} -NewFileSystemLabel "KoupreyData" -Confirm:$false -ErrorAction Stop
-$used = (Get-Volume).DriveLetter | Where-Object {{ $_ }}
+$part = Get-Partition -DiskNumber {disk} | Sort-Object PartitionNumber | Select-Object -First 1
+        $part | Format-Volume -FileSystem {fs_arg} -NewFileSystemLabel "VTOYDATA" -Confirm:$false -ErrorAction Stop
+        $used = (Get-Volume).DriveLetter | Where-Object {{ $_ }}
 $tChar = if ($used -notcontains 'T') {{ 'T' }} else {{ 90..68 | ForEach-Object {{ [char]$_ }} | Where-Object {{ $_ -notin $used }} | Select-Object -First 1 }}
 Set-Partition -DiskNumber {disk} -PartitionNumber $part.PartitionNumber -NewDriveLetter $tChar -ErrorAction Stop
 $dataDrive = $tChar + ":\\"
@@ -373,15 +329,110 @@ Write-Output "DATA=$dataDrive"
                 data_drive = line.split('=', 1)[1].strip()
                 break
         self._log(f'DATA formatted at {data_drive}')
-        self.progress.emit('Formatting done...')
+        self.progress.emit('DATA created...')
 
-        self._log('Step 5: Installing GRUB2...')
+        self._log('Step 4: Creating ESP (64 MB FAT32, Ventoy partition 2)...')
+        out, rc = _run_diskpart(['create partition efi size=64'], disk, timeout=60)
+        if rc != 0:
+            self._last_error = out or 'ESP partition creation failed'
+            self._log(f'ESP partition creation failed: {self._last_error}')
+            return False
+        self._log('ESP partition created, formatting...')
+
+        esp_mount = os.path.join(tempfile.gettempdir(), 'kp_esp')
+        os.makedirs(esp_mount, exist_ok=True)
+        ps_format = f'''
+$part = Get-Partition -DiskNumber {disk} | Where-Object {{ $_.Type -eq "EFI" -or $_.GptType -eq "{{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}}" }} | Select-Object -First 1
+if (-not $part) {{ $part = Get-Partition -DiskNumber {disk} | Sort-Object PartitionNumber | Select-Object -First 1 }}
+Set-Partition -DiskNumber {disk} -PartitionNumber $part.PartitionNumber -NoDefaultDriveLetter $true -ErrorAction SilentlyContinue
+        $part | Format-Volume -FileSystem FAT32 -NewFileSystemLabel "VTOYEFI" -Confirm:$false -ErrorAction Stop
+Add-PartitionAccessPath -DiskNumber {disk} -PartitionNumber $part.PartitionNumber -AccessPath "{esp_mount}" -ErrorAction Stop
+Write-Output "ESP={esp_mount}"
+'''
+        out, rc = _run_powershell(ps_format, timeout=60)
+        if rc != 0 or 'Error' in out or 'ESP=' not in out:
+            self._last_error = out or 'ESP creation failed'
+            self._log(f'ESP creation failed: {self._last_error}')
+            return False
+        esp_drive = ''
+        for line in out.split('\n'):
+            if line.startswith('ESP='):
+                esp_drive = line.split('=', 1)[1].strip()
+                break
+        self._log('ESP mounted to folder (hidden from Explorer)')
+        self.progress.emit('ESP created...')
+
+        self._log('Step 5: Creating BIOS Boot Partition (2 MB, partition 3)...')
+        out, rc = _run_diskpart([
+            'create partition primary size=2',
+            'set id=21686148-6449-6E6F-744E-656564454649',
+            'gpt attributes=0x8000000000000000',
+        ], disk, timeout=30)
+        if rc != 0:
+            self._last_error = out or 'BIOS Boot partition creation failed'
+            self._log(f'BIOS Boot partition creation failed: {self._last_error}')
+            return False
+        self._log('BIOS Boot partition created (bios_grub type, no auto-drive-letter)')
+        self.progress.emit('Creating partitions...')
+
+        self._log('Step 5b: Querying BIOS Boot Partition geometry...')
+        ps_bios_info = f'''
+$part = Get-Partition -DiskNumber {disk} | Where-Object {{ $_.GptType -eq "{{21686148-6449-6E6F-744E-656564454649}}" }} | Select-Object -First 1
+if (-not $part) {{ $part = Get-Partition -DiskNumber {disk} | Sort-Object PartitionNumber -Descending | Select-Object -First 1 }}
+Write-Output "OFFSET=$($part.Offset)"
+Write-Output "LBA=$([int]($part.Offset / 512))"
+Write-Output "SECTORS=$($part.Size / 512)"
+'''
+        out, rc = _run_powershell(ps_bios_info, timeout=10)
+        bios_lba = 34
+        bios_offset = 0
+        bios_sectors = 4096
+        for line in out.split('\n'):
+            line = line.strip()
+            if line.startswith('OFFSET='):
+                bios_offset = int(line.split('=', 1)[1].strip())
+            elif line.startswith('LBA='):
+                bios_lba = int(line.split('=', 1)[1].strip())
+            elif line.startswith('SECTORS='):
+                bios_sectors = int(float(line.split('=', 1)[1].strip()))
+        self._log(f'BIOS Boot Partition: LBA={bios_lba}, offset={bios_offset}, sectors={bios_sectors}')
+
+        self._log('Step 5c: Patching boot.img and writing to MBR...')
+        boot_img_path = os.path.join(BOOT_SRC, 'boot.img')
+        if os.path.isfile(boot_img_path):
+            import struct
+            with open(boot_img_path, 'rb') as f:
+                boot_img_data = bytearray(f.read())
+            struct.pack_into('<I', boot_img_data, 0x1AC, bios_lba)
+            struct.pack_into('<I', boot_img_data, 0x1B0, 0)
+            struct.pack_into('<I', boot_img_data, 0x1B8, bios_sectors)
+            current_mbr = _read_raw_disk(disk, 512, byte_offset=0)
+            merged = bytes(boot_img_data[:446]) + current_mbr[446:512]
+            _write_raw_disk(disk, merged, byte_offset=0)
+            self._log(f'boot.img patched with core LBA={bios_lba} and written to MBR')
+        else:
+            self._log(f'Warning: boot.img not found at {boot_img_path}')
+
+        self._log('Step 5d: Writing core.img to BIOS Boot Partition...')
+        core_xz_path = os.path.join(BOOT_SRC, 'core.img.xz')
+        if os.path.isfile(core_xz_path) and bios_offset:
+            with lzma.open(core_xz_path, 'rb') as f:
+                core_data = f.read()
+            _write_raw_disk(disk, core_data, byte_offset=bios_offset)
+            self._log(f'core.img written to BIOS Boot Partition at LBA={bios_lba} ({len(core_data)} bytes, {len(core_data)//512+1} sectors)')
+        else:
+            if not os.path.isfile(core_xz_path):
+                self._log(f'Warning: core.img.xz not found at {core_xz_path}')
+            if not bios_offset:
+                self._log('Warning: could not determine BIOS Boot Partition offset')
+
+        self._log('Step 6: Installing GRUB2...')
         self.progress.emit('Installing GRUB2...')
         ok = self._install_grub(esp_drive, data_drive)
         if not ok:
             return False
 
-        self._log('Step 6: Creating ISOs directory and GRUB marker...')
+        self._log('Step 7: Creating ISOs directory and GRUB marker...')
         import time
         iso_dir = os.path.join(data_drive, 'ISOS')
         os.makedirs(iso_dir, exist_ok=True)
@@ -390,28 +441,44 @@ Write-Output "DATA=$dataDrive"
             with open(dummy_path, 'w', encoding='utf-8') as f:
                 f.write('# Kouprey Boot ISO directory marker\n')
         self._log(f'Created {iso_dir}')
+
+        if self._include_rescue:
+            rescue_src = os.path.join(os.path.dirname(self._grub_src), 'redorescue-4.0.0.iso')
+            if os.path.isfile(rescue_src):
+                shutil.copy2(rescue_src, os.path.join(iso_dir, 'redorescue-4.0.0.iso'))
+                self._log('redorescue-4.0.0.iso copied to ISOS folder')
+            else:
+                self._log('Warning: redorescue-4.0.0.iso not found')
+        else:
+            self._log('Skipping redorescue ISO (unchecked)')
+
         themes_dir = os.path.join(data_drive, 'themes')
         os.makedirs(themes_dir, exist_ok=True)
         marker_path = os.path.join(themes_dir, '.marker')
         with open(marker_path, 'w', encoding='utf-8') as f:
-            f.write('# Kouprey Boot theme directory marker\n')
-        if os.path.isfile(marker_path):
-            self._log(f'GRUB marker created: {marker_path} ({os.path.getsize(marker_path)} bytes)')
-        else:
-            self._log(f'Warning: could not create GRUB marker (GRUB needs this file)')
-        self._log(f'Created {themes_dir}')
+            f.write('# Kouprey Boot DATA partition theme marker\n')
+        self._log(f'DATA themes dir created: {themes_dir}')
 
-        self._log('Step 7: Writing grub.cfg...')
-        cfg_content = _build_grub_cfg()
-        cfg_path = os.path.join(esp_drive, 'EFI', 'BOOT', 'grub.cfg')
-        os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
-        with open(cfg_path, 'w', encoding='utf-8') as f:
-            f.write(cfg_content)
-        self._log('grub.cfg written')
+        self._log('Step 8: Ensuring grub.cfg in prefix path...')
+        cfg_path = os.path.join(esp_drive, 'grub', 'grub.cfg')
+        if not os.path.isfile(cfg_path):
+            ventoy_cfg_src = os.path.join(self._grub_src, 'grub', 'grub.cfg')
+            shutil.copy2(ventoy_cfg_src, cfg_path)
+        self._log('grub.cfg verified')
 
-        self._log('Step 8: Removing ESP mount (hidden from Windows)...')
+        self._log('Step 9: Removing ESP mount (hidden from Windows)...')
         if os.path.exists(esp_mount):
-            out1, rc1 = _run_powershell(f'Remove-PartitionAccessPath -DiskNumber {disk} -PartitionNumber 1 -AccessPath "{esp_mount}" -ErrorAction Stop', timeout=15)
+            ps_esp_part = f'''
+$part = Get-Partition -DiskNumber {disk} | Where-Object {{ $_.Type -eq "EFI" -or $_.GptType -eq "{{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}}" }} | Select-Object -First 1
+Write-Output "PART=$($part.PartitionNumber)"
+'''
+            out_esp, _ = _run_powershell(ps_esp_part, timeout=10)
+            esp_part_num = 2
+            for line in out_esp.split('\n'):
+                if line.startswith('PART='):
+                    esp_part_num = int(line.split('=', 1)[1].strip())
+                    break
+            out1, rc1 = _run_powershell(f'Remove-PartitionAccessPath -DiskNumber {disk} -PartitionNumber {esp_part_num} -AccessPath "{esp_mount}" -ErrorAction Stop', timeout=15)
             if rc1 != 0:
                 subprocess.run(['mountvol', esp_mount, '/d'], capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
             try:
@@ -438,37 +505,81 @@ Write-Output "DATA=$dataDrive"
         os.makedirs(dest_grub, exist_ok=True)
         os.makedirs(dest_themes, exist_ok=True)
 
-        self._log(f'Copying BOOTX64.EFI...')
-        shutil.copy2(os.path.join(src, 'EFI', 'BOOT', 'BOOTX64.EFI'),
-                     os.path.join(dest_efi, 'BOOTX64.EFI'))
+        self._log(f'Copying EFI/BOOT directory...')
+        efi_boot_src = os.path.join(src, 'EFI', 'BOOT')
+        if os.path.isdir(efi_boot_src):
+            shutil.copytree(efi_boot_src, dest_efi, dirs_exist_ok=True)
+        real_efi = os.path.join(dest_efi, 'grubx64_real.efi')
+        if os.path.isfile(real_efi):
+            shutil.copy2(real_efi, os.path.join(dest_efi, 'BOOTX64.EFI'))
+            self._log('Replaced BOOTX64.EFI with standard GRUB (grubx64_real.efi)')
 
-        self._log(f'Copying wimboot...')
-        wimboot_src = os.path.join(src, 'EFI', 'BOOT', 'wimboot')
-        if os.path.isfile(wimboot_src):
-            shutil.copy2(wimboot_src, os.path.join(dest_efi, 'wimboot'))
+        self._log(f'Copying tool directory to EFI/BOOT...')
+        tool_src = os.path.join(src, 'tool')
+        if os.path.isdir(tool_src):
+            shutil.copytree(tool_src, dest_efi, dirs_exist_ok=True)
 
-        self._log(f'Copying GRUB2 modules...')
-        mod_src = os.path.join(src, 'grub', 'x86_64-efi')
-        if os.path.isdir(mod_src):
-            mod_dst = os.path.join(dest_grub, 'x86_64-efi')
-            os.makedirs(mod_dst, exist_ok=True)
-            for fname in os.listdir(mod_src):
-                if fname.endswith('.mod'):
-                    shutil.copy2(os.path.join(mod_src, fname),
-                                 os.path.join(mod_dst, fname))
-            self._log(f'Modules copied ({len(os.listdir(mod_dst))} files)')
+        self._log(f'Copying ventoy directory to ESP root...')
+        ventoy_src = os.path.join(src, 'ventoy')
+        dest_ventoy = os.path.join(esp_drive, 'ventoy')
+        if os.path.isdir(ventoy_src):
+            shutil.copytree(ventoy_src, dest_ventoy, dirs_exist_ok=True)
 
-        self._log(f'Copying fonts...')
-        font_src = os.path.join(src, 'grub', 'fonts')
-        if os.path.isdir(font_src):
-            font_dst = os.path.join(dest_grub, 'fonts')
-            os.makedirs(font_dst, exist_ok=True)
-            for fname in os.listdir(font_src):
-                shutil.copy2(os.path.join(font_src, fname),
-                             os.path.join(font_dst, fname))
+        self._log(f'Copying Ventoy files to DATA partition...')
+        dest_data_ventoy = os.path.join(data_drive, 'ventoy')
+        os.makedirs(dest_data_ventoy, exist_ok=True)
+        ventoy_cpio = os.path.join(src, 'ventoy', 'ventoy.cpio')
+        if os.path.isfile(ventoy_cpio):
+            shutil.copy2(ventoy_cpio, os.path.join(dest_data_ventoy, 'ventoy.cpio'))
+        ventoy_json = os.path.join(dest_data_ventoy, 'ventoy.json')
+        if not os.path.isfile(ventoy_json):
+            with open(ventoy_json, 'w', encoding='utf-8') as f:
+                f.write('{"control":[{"VTOY_DEFAULT_SEARCH_ROOT":"/ISOS"}]}\n')
+
+        self._log(f'Copying grub.cfg to EFI/BOOT (fallback prefix)...')
+        cfg_src = os.path.join(src, 'grub', 'grub.cfg')
+        if os.path.isfile(cfg_src):
+            shutil.copy2(cfg_src, os.path.join(dest_efi, 'grub.cfg'))
+
+        self._log(f'Copying MOK manager certificate...')
+        cert_src = os.path.join(src, 'ENROLL_THIS_KEY_IN_MOKMANAGER.cer')
+        if os.path.isfile(cert_src):
+            shutil.copy2(cert_src, os.path.join(dest_efi, 'ENROLL_THIS_KEY_IN_MOKMANAGER.cer'))
+
+        self._log(f'Copying GRUB directory...')
+        grub_src = os.path.join(src, 'grub')
+        if os.path.isdir(grub_src):
+            shutil.copytree(grub_src, dest_grub, dirs_exist_ok=True)
+            self._log(f'GRUB directory copied')
+
+        self._log(f'Copying ventoy.disk to ESP root...')
+        ventoy_src = os.path.join(self._grub_src, 'grub', 'ventoy.disk')
+        if os.path.isfile(ventoy_src):
+            shutil.copy2(ventoy_src, os.path.join(esp_drive, 'ventoy.disk'))
+            self._log(f'ventoy.disk copied to ESP root')
+        else:
+            self._log('Warning: ventoy.disk not found')
+            ventoy_src2 = os.path.join(self._grub_src, 'grub', 'ventoy.disk.img')
+            if os.path.isfile(ventoy_src2):
+                shutil.copy2(ventoy_src2, os.path.join(esp_drive, 'ventoy.disk.img'))
+                self._log('ventoy.disk.img copied (fallback)')
+
+        self._log(f'Copying boot.img and core.img.xz to ESP root...')
+        boot_img_src = os.path.join(BOOT_SRC, 'boot.img')
+        if os.path.isfile(boot_img_src):
+            shutil.copy2(boot_img_src, os.path.join(esp_drive, 'boot.img'))
+            self._log('boot.img copied to ESP root')
+        else:
+            self._log('Warning: boot.img not found')
+        core_xz_src = os.path.join(BOOT_SRC, 'core.img.xz')
+        if os.path.isfile(core_xz_src):
+            shutil.copy2(core_xz_src, os.path.join(esp_drive, 'core.img.xz'))
+            self._log('core.img.xz copied to ESP root')
+        else:
+            self._log('Warning: core.img.xz not found')
 
         self._log(f'Copying default theme (Vimix)...')
-        theme_src = os.path.join(src, 'themes', 'Vimix')
+        theme_src = os.path.join(_base, 'themes', 'Vimix-theme', 'themes')
         if os.path.isdir(theme_src):
             for fname in os.listdir(theme_src):
                 s = os.path.join(theme_src, fname)
@@ -479,15 +590,10 @@ Write-Output "DATA=$dataDrive"
                     shutil.copy2(s, d)
             self._log(f'Default theme copied to {dest_themes}')
 
-        old_marker = os.path.join(data_drive, 'THEMES')
-        if os.path.isfile(old_marker):
-            os.remove(old_marker)
-            self._log(f'Removed old THEMES marker (now using themes/.marker)')
-
         marker_path = os.path.join(dest_themes, '.marker')
         if not os.path.isfile(marker_path):
             with open(marker_path, 'w', encoding='utf-8') as f:
-                f.write('# Kouprey Boot GRUB data partition marker\n')
+                f.write('# Kouprey Boot DATA partition theme marker\n')
 
         self._log('GRUB2 installed successfully')
         return True
@@ -497,8 +603,8 @@ Write-Output "DATA=$dataDrive"
         return False
 
 
-def create_flash_worker(disk_number: int, file_system: str = 'exfat'):
-    return KoupreyFlashWorker(disk_number, file_system)
+def create_flash_worker(disk_number: int, file_system: str = 'exfat', include_rescue: bool = False):
+    return KoupreyFlashWorker(disk_number, file_system, include_rescue)
 
 
 class DeployWorker(QThread):
@@ -510,7 +616,7 @@ class DeployWorker(QThread):
         super().__init__()
         self._disk = disk_number
         self._mount = mount_point if mount_point.endswith('\\') else mount_point + '\\' if mount_point else ''
-        self._data_mount = (data_mount_point if data_mount_point.endswith('\\') else data_mount_point + '\\') if data_mount_point else self._mount
+        self._data_mount = (data_mount_point if data_mount_point.endswith('\\') else data_mount_point + '\\') if data_mount_point else ''
         self._grub_dir = grub_dir
         self._options = options
         self._log_path = ''
@@ -527,12 +633,12 @@ class DeployWorker(QThread):
                 pass
 
     def _mount_esp(self) -> str:
-        self._esp_mount = os.path.join(tempfile.gettempdir(), 'kp_esp_d')
-        os.makedirs(self._esp_mount, exist_ok=True)
-        ps = f'Add-PartitionAccessPath -DiskNumber {self._disk} -PartitionNumber 1 -AccessPath "{self._esp_mount}" -ErrorAction Stop'
+        mount_path = os.path.join(tempfile.gettempdir(), 'kp_esp_d')
+        os.makedirs(mount_path, exist_ok=True)
+        ps = f'Add-PartitionAccessPath -DiskNumber {self._disk} -PartitionNumber 1 -AccessPath "{mount_path}" -ErrorAction Stop'
         out, rc = _run_powershell(ps, timeout=15)
         if rc == 0:
-            return self._esp_mount
+            return mount_path
         return ''
 
     def _unmount_esp(self):
@@ -558,27 +664,21 @@ class DeployWorker(QThread):
             except Exception:
                 pass
 
+        _suppress_format_dialogs()
+
         try:
             theme_name = self._options.get('theme')
-            if theme_name and self._options.get('theme_path'):
+            theme_path = self._options.get('theme_path')
+            if theme_name and theme_path:
                 self.progress.emit(f'Applying theme: {theme_name}...')
 
+                # Deploy theme to DATA partition
+                if not self._data_mount:
+                    self._log('DATA mount not available')
+                    raise RuntimeError('DATA partition not found')
                 themes_root = os.path.join(self._data_mount, 'themes')
-                old_marker = os.path.join(self._data_mount, 'THEMES')
-                if os.path.isfile(old_marker):
-                    os.remove(old_marker)
-                    self._log('Removed old THEMES marker file')
-                if os.path.isfile(themes_root):
-                    os.remove(themes_root)
-                    self._log('Removed file blocking themes/ directory')
                 os.makedirs(themes_root, exist_ok=True)
 
-                # Preserve .marker, clear everything else
-                marker_path = os.path.join(themes_root, '.marker')
-                marker_content = ''
-                if os.path.isfile(marker_path):
-                    with open(marker_path, 'r', encoding='utf-8') as f:
-                        marker_content = f.read()
                 for item in os.listdir(themes_root):
                     if item == '.marker':
                         continue
@@ -588,10 +688,33 @@ class DeployWorker(QThread):
                     else:
                         os.remove(item_path)
 
-                shutil.copytree(self._options['theme_path'], themes_root, dirs_exist_ok=True)
-                with open(marker_path, 'w', encoding='utf-8') as f:
-                    f.write(marker_content or '# Kouprey Boot GRUB data partition marker\n')
-                self._log(f'Theme "{theme_name}" deployed to {themes_root}')
+                shutil.copytree(theme_path, themes_root, dirs_exist_ok=True)
+
+                marker_path = os.path.join(themes_root, '.marker')
+                if not os.path.isfile(marker_path):
+                    with open(marker_path, 'w', encoding='utf-8') as f:
+                        f.write('# Kouprey Boot DATA partition theme marker\n')
+
+                self._log(f'Theme "{theme_name}" deployed to DATA: {themes_root}')
+
+                # Mount ESP and verify grub.cfg exists
+                if not self._mount:
+                    mounted = self._mount_esp()
+                    if mounted:
+                        self._esp_mount = mounted
+                        self._mount = mounted + '\\'
+                        self._log(f'ESP mounted to {self._mount}')
+                else:
+                    self._esp_mount = self._mount.rstrip('\\')
+
+                if self._esp_mount:
+                    cfg_path = os.path.join(self._esp_mount, 'EFI', 'BOOT', 'grub.cfg')
+                    if not os.path.isfile(cfg_path):
+                        cfg_path = os.path.join(self._esp_mount, 'grub', 'grub.cfg')
+                    if os.path.isfile(cfg_path):
+                        self._log('grub.cfg verified on ESP')
+                    else:
+                        self._log('Warning: grub.cfg not found on ESP')
 
             self.finished.emit(True, f'Deployment complete!\nLog: {self._log_path}')
 
@@ -599,4 +722,5 @@ class DeployWorker(QThread):
             self._log(f'Exception: {e}')
             self.finished.emit(False, f'{e}\nLog: {self._log_path}')
         finally:
-            pass
+            self._unmount_esp()
+            _restore_format_dialogs()

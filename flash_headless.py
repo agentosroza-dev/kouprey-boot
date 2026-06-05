@@ -118,7 +118,7 @@ def do_deploy(disk_number, theme_name):
         letter = p.get('DriveLetter', '')
         label = p.get('Label', '')
         num = p.get('Number', 0)
-        if label == 'KoupreyData' and letter:
+        if (label == 'VTOYDATA' or label == 'KoupreyData') and letter:
             data_mount = letter.rstrip('\\')
         elif num == 1:
             # ESP is usually partition 1, may not have a drive letter

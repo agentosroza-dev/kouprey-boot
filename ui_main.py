@@ -269,6 +269,15 @@ class FlashPage(QWidget):
         options_row.addStretch()
         card_layout.addLayout(options_row)
 
+        rescue_row = QHBoxLayout()
+        rescue_row.setSpacing(8)
+        self._rescue_check = QCheckBox('Include Rescue ISO (redorescue)')
+        self._rescue_check.setStyleSheet('font-size: 10pt; background: transparent;')
+        self._rescue_check.setChecked(False)
+        rescue_row.addWidget(self._rescue_check)
+        rescue_row.addStretch()
+        card_layout.addLayout(rescue_row)
+
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
         self._btn_flash = QPushButton('\u26a1 Flash')
@@ -376,6 +385,7 @@ class FlashPage(QWidget):
         self._worker = create_flash_worker(
             self._drive.number,
             file_system=self._file_system.currentData(),
+            include_rescue=self._rescue_check.isChecked(),
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.log.connect(self._log)

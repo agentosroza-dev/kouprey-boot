@@ -14,3 +14,4 @@ env/
 *.spec
 themes/*.zip
 themes/*/*.zip
+assets/redorescue-4.0.0.iso
