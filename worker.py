@@ -459,6 +459,10 @@ Write-Output "SECTORS=$($part.Size / 512)"
             f.write('# Kouprey Boot DATA partition theme marker\n')
         self._log(f'DATA themes dir created: {themes_dir}')
 
+        self._log('Generating ISO menu entries...')
+        self._generate_iso_menu(data_drive)
+        self._log('ISO menu generated')
+
         self._log('Step 8: Ensuring grub.cfg in prefix path...')
         cfg_path = os.path.join(esp_drive, 'grub', 'grub.cfg')
         if not os.path.isfile(cfg_path):
@@ -601,6 +605,31 @@ Write-Output "PART=$($part.PartitionNumber)"
     def _flash_linux(self) -> bool:
         self._log('Linux flash not yet implemented')
         return False
+
+    @staticmethod
+    def _generate_iso_menu(data_drive: str):
+        iso_dir = os.path.join(data_drive, 'ISOS')
+        menu_path = os.path.join(iso_dir, '.iso_menu.cfg')
+        if not os.path.isdir(iso_dir):
+            return
+        entries = []
+        for fname in sorted(os.listdir(iso_dir)):
+            if fname == '.iso_menu.cfg':
+                continue
+            ext = os.path.splitext(fname)[1].lower()
+            if ext not in ('.iso', '.img'):
+                continue
+            safe_name = fname.replace('"', '\\"')
+            entries.append(
+                f'menuentry "Boot {safe_name}" --class iso {{\n'
+                f'    boot_iso "($data_root)/ISOS/{safe_name}"\n'
+                f'}}'
+            )
+        with open(menu_path, 'w', encoding='utf-8') as f:
+            f.write('# Kouprey Boot ISO menu - auto-generated\n')
+            f.write('# Re-generate: python flash_headless.py -gen-iso-menu -disk N\n')
+            f.write('\n'.join(entries))
+            f.write('\n')
 
 
 def create_flash_worker(disk_number: int, file_system: str = 'exfat', include_rescue: bool = False):

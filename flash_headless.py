@@ -165,16 +165,63 @@ def do_deploy(disk_number, theme_name):
         log(f'ERROR: {result["msg"]}', log_path)
     return result['ok'], result['msg']
 
+def do_gen_iso_menu(disk_number):
+    """Regenerate .iso_menu.cfg on an already-flashed USB."""
+    import subprocess, json
+    ps_script = f'''
+    $disk = Get-Disk -Number {disk_number} -ErrorAction SilentlyContinue
+    if (-not $disk) {{ exit 1 }}
+    $parts = Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue
+    $result = @()
+    foreach ($part in $parts) {{
+        $vol = Get-Volume -Partition $part -ErrorAction SilentlyContinue
+        $letter = if ($vol.DriveLetter) {{ $vol.DriveLetter + ":\\" }} else {{ "" }}
+        $label = if ($vol.FileSystemLabel) {{ $vol.FileSystemLabel }} else {{ "" }}
+        $result += [PSCustomObject]@{{
+            DriveLetter = $letter
+            Label = $label
+        }}
+    }}
+    $result | ConvertTo-Json
+    '''
+    proc = subprocess.run(['powershell', '-NoProfile', '-Command', ps_script],
+                          capture_output=True, text=True, timeout=15,
+                          creationflags=subprocess.CREATE_NO_WINDOW)
+    if proc.returncode != 0:
+        print('ERROR: Could not query disk')
+        return False
+
+    partitions = json.loads(proc.stdout) if proc.stdout.strip() else []
+    data_drive = ''
+    for p in partitions:
+        label = p.get('Label', '')
+        letter = p.get('DriveLetter', '')
+        if label in ('VTOYDATA', 'KoupreyData') and letter:
+            data_drive = letter
+            break
+    if not data_drive:
+        print('ERROR: DATA partition not found')
+        return False
+
+    from worker import KoupreyFlashWorker
+    KoupreyFlashWorker._generate_iso_menu(data_drive.rstrip('\\'))
+    print(f'OK: ISO menu regenerated on {data_drive}')
+    return True
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Kouprey Boot Flash/Deploy Tool')
     parser.add_argument('-disk', type=int, default=2, help='Disk number')
     parser.add_argument('-fs', default='exfat', choices=['exfat', 'ntfs', 'fat32'], help='File system')
     parser.add_argument('-deploy', action='store_true', help='Deploy theme mode')
     parser.add_argument('-theme', default='Vimix', help='Theme name to deploy')
+    parser.add_argument('-gen-iso-menu', action='store_true', help='Regenerate ISO menu on DATA partition')
 
     args = parser.parse_args()
 
-    if args.deploy:
+    if args.gen_iso_menu:
+        ok = do_gen_iso_menu(args.disk)
+    elif args.deploy:
         ok, msg = do_deploy(args.disk, args.theme)
     else:
         ok, msg = do_flash(args.disk, args.fs)
