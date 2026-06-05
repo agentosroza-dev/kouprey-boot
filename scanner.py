@@ -135,11 +135,11 @@ def _detect_windows_drives() -> list[DriveInfo]:
         $mount = ""
         $dataMount = ""
         $kouprey = $false
-        $checked = $false
+        $foundVol = $false
         foreach ($part in $parts) {
             $vol = Get-Volume -Partition $part -ErrorAction SilentlyContinue
             if ($vol.DriveLetter) {
-                $checked = $true
+                $foundVol = $true
                 $mp = $vol.DriveLetter + ":\\"
                 if ((Test-Path ($mp + "ISOS")) -or ($vol.FileSystemLabel -eq "VTOYDATA") -or ($vol.FileSystemLabel -eq "KoupreyData")) {
                     $kouprey = $true
@@ -147,9 +147,10 @@ def _detect_windows_drives() -> list[DriveInfo]:
                 } elseif (-not $mount) {
                     $mount = $mp
                 }
+            } elseif ($vol.FileSystemLabel -eq "VTOYEFI") {
+                $kouprey = $true
             }
         }
-        if (-not $checked) { $kouprey = $true }
         $result += [PSCustomObject]@{
             Number = $disk.Number
             Model = $disk.FriendlyName

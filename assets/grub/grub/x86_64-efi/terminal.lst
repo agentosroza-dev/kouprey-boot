@@ -1,5 +1,4 @@
 iat_keyboard: at_keyboard
-imouse: mouse
 iserial: serial
 iserial_*: serial
 oaudio: morse

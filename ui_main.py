@@ -3,7 +3,7 @@ import os
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QMessageBox, QFrame, QApplication,
-    QStackedWidget, QComboBox, QCheckBox, QProgressBar,
+    QStackedWidget, QComboBox, QProgressBar,
     QScrollArea, QGroupBox, QListWidget, QListWidgetItem,
     QSizePolicy, QSpinBox,
 )
@@ -269,15 +269,6 @@ class FlashPage(QWidget):
         options_row.addStretch()
         card_layout.addLayout(options_row)
 
-        rescue_row = QHBoxLayout()
-        rescue_row.setSpacing(8)
-        self._rescue_check = QCheckBox('Include Rescue ISO (redorescue)')
-        self._rescue_check.setStyleSheet('font-size: 10pt; background: transparent;')
-        self._rescue_check.setChecked(False)
-        rescue_row.addWidget(self._rescue_check)
-        rescue_row.addStretch()
-        card_layout.addLayout(rescue_row)
-
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
         self._btn_flash = QPushButton('\u26a1 Flash')
@@ -371,6 +362,7 @@ class FlashPage(QWidget):
 
     def _start(self):
         self._btn_flash.setEnabled(False)
+        self._file_system.setEnabled(False)
         self._progress.setVisible(True)
         self._progress_label.setVisible(True)
         self._progress.setValue(0)
@@ -385,7 +377,6 @@ class FlashPage(QWidget):
         self._worker = create_flash_worker(
             self._drive.number,
             file_system=self._file_system.currentData(),
-            include_rescue=self._rescue_check.isChecked(),
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.log.connect(self._log)
@@ -399,7 +390,7 @@ class FlashPage(QWidget):
         self._progress_label.setText(f'{pct}% - {msg}')
 
     def _on_finished(self, ok: bool, msg: str):
-        self._btn_flash.setEnabled(True)
+        self._file_system.setEnabled(True)
         self._progress.setValue(100 if ok else 0)
         self._progress_label.setText('100% - Complete' if ok else f'Failed - {msg}')
         QTimer.singleShot(3000, lambda: self._progress_label.setVisible(False))
@@ -413,6 +404,7 @@ class FlashPage(QWidget):
             self._btn_flash.setEnabled(False)
             QMessageBox.information(self, 'Success', msg)
         else:
+            self._btn_flash.setEnabled(True)
             QMessageBox.critical(self, 'Error', msg)
 
 
@@ -761,17 +753,22 @@ class KoupreyBootFlashWindow(QMainWindow):
         layout.setContentsMargins(8, 16, 8, 16)
         layout.setSpacing(2)
 
+        header_row = QHBoxLayout()
+        header_row.setSpacing(10)
+
         logo = QLabel()
         logo.setFixedSize(32, 32)
         self._logo_pixmap = logo
         self._update_logo()
-        layout.addWidget(logo, alignment=Qt.AlignmentFlag.AlignCenter)
+        header_row.addWidget(logo)
 
         name = QLabel('Kouprey\nBoot Flash')
-        name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         name.setObjectName('titleLabel')
         name.setStyleSheet('font-size: 11pt; font-weight: 600;')
-        layout.addWidget(name)
+        header_row.addWidget(name)
+
+        header_row.addStretch()
+        layout.addLayout(header_row)
         layout.addSpacing(20)
 
         self._nav_btns = {}

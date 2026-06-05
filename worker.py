@@ -154,11 +154,11 @@ class KoupreyFlashWorker(QThread):
     finished = pyqtSignal(bool, str)
     log = pyqtSignal(str)
 
-    def __init__(self, disk_number: int, file_system: str = 'exfat', include_rescue: bool = False):
+    def __init__(self, disk_number: int, file_system: str = 'exfat', selected_isos: list[str] = None):
         super().__init__()
         self._disk_number = disk_number
         self._file_system = file_system
-        self._include_rescue = include_rescue
+        self._selected_isos = selected_isos
         self._grub_src = GRUB_SRC
         self._last_error = ''
         self._log_path = ''
@@ -331,41 +331,18 @@ Write-Output "DATA=$dataDrive"
         self._log(f'DATA formatted at {data_drive}')
         self.progress.emit('DATA created...')
 
-        self._log('Step 4: Creating ESP (64 MB FAT32, Ventoy partition 2)...')
+        self._log('Step 4: Creating ESP partition (64 MB FAT32)...')
         out, rc = _run_diskpart(['create partition efi size=64'], disk, timeout=60)
         if rc != 0:
             self._last_error = out or 'ESP partition creation failed'
             self._log(f'ESP partition creation failed: {self._last_error}')
             return False
-        self._log('ESP partition created, formatting...')
-
-        esp_mount = os.path.join(tempfile.gettempdir(), 'kp_esp')
-        os.makedirs(esp_mount, exist_ok=True)
-        ps_format = f'''
-$part = Get-Partition -DiskNumber {disk} | Where-Object {{ $_.Type -eq "EFI" -or $_.GptType -eq "{{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}}" }} | Select-Object -First 1
-if (-not $part) {{ $part = Get-Partition -DiskNumber {disk} | Sort-Object PartitionNumber | Select-Object -First 1 }}
-Set-Partition -DiskNumber {disk} -PartitionNumber $part.PartitionNumber -NoDefaultDriveLetter $true -ErrorAction SilentlyContinue
-        $part | Format-Volume -FileSystem FAT32 -NewFileSystemLabel "VTOYEFI" -Confirm:$false -ErrorAction Stop
-Add-PartitionAccessPath -DiskNumber {disk} -PartitionNumber $part.PartitionNumber -AccessPath "{esp_mount}" -ErrorAction Stop
-Write-Output "ESP={esp_mount}"
-'''
-        out, rc = _run_powershell(ps_format, timeout=60)
-        if rc != 0 or 'Error' in out or 'ESP=' not in out:
-            self._last_error = out or 'ESP creation failed'
-            self._log(f'ESP creation failed: {self._last_error}')
-            return False
-        esp_drive = ''
-        for line in out.split('\n'):
-            if line.startswith('ESP='):
-                esp_drive = line.split('=', 1)[1].strip()
-                break
-        self._log('ESP mounted to folder (hidden from Explorer)')
-        self.progress.emit('ESP created...')
+        self._log('ESP partition created (will format after BIOS Boot)')
 
         self._log('Step 5: Creating BIOS Boot Partition (2 MB, partition 3)...')
         out, rc = _run_diskpart([
             'create partition primary size=2',
-            'set id=21686148-6449-6E6F-744E-656564454649',
+            'set id=21686148-6449-6E6F-744E-656564454649 override',
             'gpt attributes=0x8000000000000000',
         ], disk, timeout=30)
         if rc != 0:
@@ -418,13 +395,40 @@ Write-Output "SECTORS=$($part.Size / 512)"
         if os.path.isfile(core_xz_path) and bios_offset:
             with lzma.open(core_xz_path, 'rb') as f:
                 core_data = f.read()
+            # Pad to 512-byte sector boundary (required for physical disk writes)
+            pad = (512 - len(core_data) % 512) % 512
+            if pad:
+                core_data += b'\x00' * pad
             _write_raw_disk(disk, core_data, byte_offset=bios_offset)
-            self._log(f'core.img written to BIOS Boot Partition at LBA={bios_lba} ({len(core_data)} bytes, {len(core_data)//512+1} sectors)')
+            self._log(f'core.img written to BIOS Boot Partition at LBA={bios_lba} ({len(core_data)} bytes, {len(core_data)//512} sectors)')
         else:
             if not os.path.isfile(core_xz_path):
                 self._log(f'Warning: core.img.xz not found at {core_xz_path}')
             if not bios_offset:
                 self._log('Warning: could not determine BIOS Boot Partition offset')
+
+        self._log('Step 5e: Formatting and mounting ESP...')
+        esp_mount = os.path.join(tempfile.gettempdir(), 'kp_esp')
+        os.makedirs(esp_mount, exist_ok=True)
+        ps_format = f'''
+$part = Get-Partition -DiskNumber {disk} | Where-Object {{ $_.Type -eq "EFI" -or $_.GptType -eq "{{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}}" }} | Select-Object -First 1
+if (-not $part) {{ $part = Get-Partition -DiskNumber {disk} | Sort-Object PartitionNumber | Select-Object -Skip 1 -First 1 }}
+Set-Partition -DiskNumber {disk} -PartitionNumber $part.PartitionNumber -NoDefaultDriveLetter $true -ErrorAction SilentlyContinue
+        $part | Format-Volume -FileSystem FAT32 -NewFileSystemLabel "VTOYEFI" -Confirm:$false -ErrorAction Stop
+Add-PartitionAccessPath -DiskNumber {disk} -PartitionNumber $part.PartitionNumber -AccessPath "{esp_mount}" -ErrorAction Stop
+Write-Output "ESP={esp_mount}"
+'''
+        out, rc = _run_powershell(ps_format, timeout=60)
+        if rc != 0 or 'Error' in out or 'ESP=' not in out:
+            self._last_error = out or 'ESP format/mount failed'
+            self._log(f'ESP format/mount failed: {self._last_error}')
+            return False
+        esp_drive = ''
+        for line in out.split('\n'):
+            if line.startswith('ESP='):
+                esp_drive = line.split('=', 1)[1].strip()
+                break
+        self._log('ESP formatted and mounted to folder (hidden from Explorer)')
 
         self._log('Step 6: Installing GRUB2...')
         self.progress.emit('Installing GRUB2...')
@@ -442,15 +446,24 @@ Write-Output "SECTORS=$($part.Size / 512)"
                 f.write('# Kouprey Boot ISO directory marker\n')
         self._log(f'Created {iso_dir}')
 
-        if self._include_rescue:
-            rescue_src = os.path.join(os.path.dirname(self._grub_src), 'redorescue-4.0.0.iso')
-            if os.path.isfile(rescue_src):
-                shutil.copy2(rescue_src, os.path.join(iso_dir, 'redorescue-4.0.0.iso'))
-                self._log('redorescue-4.0.0.iso copied to ISOS folder')
-            else:
-                self._log('Warning: redorescue-4.0.0.iso not found')
+        disk_src = os.path.join(_base, 'assets', 'disk')
+        if os.path.isdir(disk_src):
+            items_to_copy = self._selected_isos if self._selected_isos is not None else os.listdir(disk_src)
+            copied = 0
+            for item in items_to_copy:
+                s = os.path.join(disk_src, item)
+                if not os.path.exists(s):
+                    self._log(f'  Skipped (not found): {item}')
+                    continue
+                d = os.path.join(iso_dir, item)
+                if os.path.isdir(s):
+                    shutil.copytree(s, d, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(s, d)
+                copied += 1
+            self._log(f'Copied {copied} item(s) to ISOS')
         else:
-            self._log('Skipping redorescue ISO (unchecked)')
+            self._log(f'Warning: {disk_src} not found')
 
         themes_dir = os.path.join(data_drive, 'themes')
         os.makedirs(themes_dir, exist_ok=True)
@@ -463,12 +476,14 @@ Write-Output "SECTORS=$($part.Size / 512)"
         self._generate_iso_menu(data_drive)
         self._log('ISO menu generated')
 
-        self._log('Step 8: Ensuring grub.cfg in prefix path...')
-        cfg_path = os.path.join(esp_drive, 'grub', 'grub.cfg')
-        if not os.path.isfile(cfg_path):
-            ventoy_cfg_src = os.path.join(self._grub_src, 'grub', 'grub.cfg')
-            shutil.copy2(ventoy_cfg_src, cfg_path)
-        self._log('grub.cfg verified')
+        self._log('Step 8: Copying grub.cfg to ESP...')
+        src_cfg = os.path.join(_base, 'assets', 'grub', 'grub', 'grub.cfg')
+        cfg_main = os.path.join(esp_drive, 'grub', 'grub.cfg')
+        cfg_fallback = os.path.join(esp_drive, 'EFI', 'BOOT', 'grub.cfg')
+        shutil.copy2(src_cfg, cfg_main)
+        os.makedirs(os.path.dirname(cfg_fallback), exist_ok=True)
+        shutil.copy2(src_cfg, cfg_fallback)
+        self._log('grub.cfg copied to ESP (grub/ + EFI/BOOT/)')
 
         self._log('Step 9: Removing ESP mount (hidden from Windows)...')
         if os.path.exists(esp_mount):
@@ -539,11 +554,6 @@ Write-Output "PART=$($part.PartitionNumber)"
         if not os.path.isfile(ventoy_json):
             with open(ventoy_json, 'w', encoding='utf-8') as f:
                 f.write('{"control":[{"VTOY_DEFAULT_SEARCH_ROOT":"/ISOS"}]}\n')
-
-        self._log(f'Copying grub.cfg to EFI/BOOT (fallback prefix)...')
-        cfg_src = os.path.join(src, 'grub', 'grub.cfg')
-        if os.path.isfile(cfg_src):
-            shutil.copy2(cfg_src, os.path.join(dest_efi, 'grub.cfg'))
 
         self._log(f'Copying MOK manager certificate...')
         cert_src = os.path.join(src, 'ENROLL_THIS_KEY_IN_MOKMANAGER.cer')
@@ -632,8 +642,8 @@ Write-Output "PART=$($part.PartitionNumber)"
             f.write('\n')
 
 
-def create_flash_worker(disk_number: int, file_system: str = 'exfat', include_rescue: bool = False):
-    return KoupreyFlashWorker(disk_number, file_system, include_rescue)
+def create_flash_worker(disk_number: int, file_system: str = 'exfat', selected_isos: list[str] = None):
+    return KoupreyFlashWorker(disk_number, file_system, selected_isos)
 
 
 class DeployWorker(QThread):
@@ -661,10 +671,18 @@ class DeployWorker(QThread):
             except Exception:
                 pass
 
+    def _get_esp_partition_number(self) -> int:
+        ps = f'$part = Get-Partition -DiskNumber {self._disk} | Where-Object {{ $_.GptType -eq "{{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}}" }} | Select-Object -First 1; if (-not $part) {{ $part = Get-Partition -DiskNumber {self._disk} | Sort-Object PartitionNumber | Select-Object -Skip 1 -First 1 }}; Write-Output $part.PartitionNumber'
+        out, rc = _run_powershell(ps, timeout=10)
+        if rc == 0 and out.strip().isdigit():
+            return int(out.strip())
+        return 2
+
     def _mount_esp(self) -> str:
         mount_path = os.path.join(tempfile.gettempdir(), 'kp_esp_d')
         os.makedirs(mount_path, exist_ok=True)
-        ps = f'Add-PartitionAccessPath -DiskNumber {self._disk} -PartitionNumber 1 -AccessPath "{mount_path}" -ErrorAction Stop'
+        part_num = self._get_esp_partition_number()
+        ps = f'Add-PartitionAccessPath -DiskNumber {self._disk} -PartitionNumber {part_num} -AccessPath "{mount_path}" -ErrorAction Stop'
         out, rc = _run_powershell(ps, timeout=15)
         if rc == 0:
             return mount_path
@@ -672,7 +690,8 @@ class DeployWorker(QThread):
 
     def _unmount_esp(self):
         if self._esp_mount and os.path.exists(self._esp_mount):
-            _run_powershell(f'Remove-PartitionAccessPath -DiskNumber {self._disk} -PartitionNumber 1 -AccessPath "{self._esp_mount}" -ErrorAction Stop', timeout=10)
+            part_num = self._get_esp_partition_number()
+            _run_powershell(f'Remove-PartitionAccessPath -DiskNumber {self._disk} -PartitionNumber {part_num} -AccessPath "{self._esp_mount}" -ErrorAction Stop', timeout=10)
             try:
                 os.rmdir(self._esp_mount)
             except Exception:

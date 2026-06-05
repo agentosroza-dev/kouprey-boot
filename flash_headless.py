@@ -75,8 +75,9 @@ def do_deploy(disk_number, theme_name):
     log(f'=== DEPLOY: Disk #{disk_number}, Theme={theme_name} ===', log_path)
 
     from scanner import list_available_themes
+    import os as _os
 
-    themes = list_available_themes('themes')
+    themes = list_available_themes(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'themes'))
     theme_map = {t.name: t.path for t in themes}
     if theme_name not in theme_map:
         log(f'ERROR: Theme "{theme_name}" not found. Available: {list(theme_map.keys())}', log_path)
@@ -114,23 +115,31 @@ def do_deploy(disk_number, theme_name):
     partitions = json.loads(proc.stdout) if proc.stdout.strip() else []
     data_mount = ''
     esp_mount = ''
+    esp_part_num = 0
     for p in partitions:
         letter = p.get('DriveLetter', '')
         label = p.get('Label', '')
         num = p.get('Number', 0)
         if (label == 'VTOYDATA' or label == 'KoupreyData') and letter:
             data_mount = letter.rstrip('\\')
-        elif num == 1:
-            # ESP is usually partition 1, may not have a drive letter
-            pass
-        # For fallback: first partition with a letter
-        if not esp_mount and letter:
-            esp_mount = letter.rstrip('\\')
+        elif label == 'VTOYEFI':
+            esp_part_num = num
+            if letter:
+                esp_mount = letter.rstrip('\\')
 
-    log(f'  data_mount="{data_mount}" esp_mount="{esp_mount}"', log_path)
-    if not data_mount and not esp_mount:
-        log('ERROR: No mounted partitions found', log_path)
-        return False, 'No mounted partitions found'
+    log(f'  data_mount="{data_mount}" esp_part_num={esp_part_num}', log_path)
+
+    if not data_mount:
+        # Try fallback: first partition with a letter
+        for p in partitions:
+            letter = p.get('DriveLetter', '')
+            if letter:
+                data_mount = letter.rstrip('\\')
+                break
+
+    if not data_mount:
+        log('ERROR: No mounted DATA partition found', log_path)
+        return False, 'No mounted DATA partition found'
 
     app = QApplication(sys.argv)
     result = {'ok': False, 'msg': ''}

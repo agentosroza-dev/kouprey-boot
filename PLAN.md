@@ -261,3 +261,20 @@ UEFI → ESP/EFI/BOOT/BOOTX64.EFI → GRUB → grub.cfg
 | `worker.py:481-496` | `_install_grub`: Copy `ventoy.cpio` + create `ventoy.json` on DATA partition (Ventoy validation fix) |
 | `worker.py:65-81` | Replaced `SetFilePointer` (32-bit) with `SetFilePointerEx` (64-bit) for >2GB offsets |
 | `worker.py:181-185` | `diskpart automount disable` at flash start / re-enable in finally (suppress format dialogs) |
+
+## ISO Selection Checkboxes (Flash Page)
+
+### Feature
+- **Flash page** now lists sample ISO files from `assets/disk/` with checkboxes
+- Checkbox default: **unchecked** (user must explicitly select ISOs to copy)
+- Only checked ISOs are copied to `ISOS/` on the DATA partition during flash
+- Headless CLI mode is unaffected (copies all ISOs as before)
+
+### Files changed
+| File | Change |
+|------|--------|
+| `ui_main.py` | Added `QCheckBox` imports + ISO checklist section in `FlashPage._build()` |
+| `ui_main.py` | Modified `FlashPage._start()` to collect checked ISOs and pass to worker |
+| `worker.py` | Added `selected_isos` param to `KoupreyFlashWorker.__init__()` |
+| `worker.py` | Updated Step 7 (`_flash_windows`) to filter by `selected_isos` |
+| `worker.py` | Updated `create_flash_worker()` to accept and forward `selected_isos` |
