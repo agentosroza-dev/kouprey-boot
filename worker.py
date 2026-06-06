@@ -628,8 +628,7 @@ Write-Output "PART=$($part.PartitionNumber)"
     def _generate_iso_menu(data_drive: str):
         iso_dir = os.path.join(data_drive, 'ISOS')
         menu_path = os.path.join(iso_dir, '.iso_menu.cfg')
-        if not os.path.isdir(iso_dir):
-            return
+        os.makedirs(iso_dir, exist_ok=True)
         entries = []
         for fname in sorted(os.listdir(iso_dir)):
             if fname == '.iso_menu.cfg':
@@ -645,9 +644,11 @@ Write-Output "PART=$($part.PartitionNumber)"
             )
         with open(menu_path, 'w', encoding='utf-8') as f:
             f.write('# Kouprey Boot ISO menu - auto-generated\n')
+            f.write(f'# {len(entries)} ISO(s) found\n')
             f.write('# Re-generate: python flash_headless.py -gen-iso-menu -disk N\n')
             f.write('\n'.join(entries))
             f.write('\n')
+        return len(entries)
 
 
 def create_flash_worker(disk_number: int, file_system: str = 'exfat', selected_isos: list[str] = None):
