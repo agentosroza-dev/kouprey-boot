@@ -532,6 +532,10 @@ Write-Output "PART=$($part.PartitionNumber)"
         if os.path.isfile(real_efi):
             shutil.copy2(real_efi, os.path.join(dest_efi, 'BOOTX64.EFI'))
             self._log('Replaced BOOTX64.EFI with standard GRUB (grubx64_real.efi)')
+        real_efi_ia32 = os.path.join(dest_efi, 'grubia32_real.efi')
+        if os.path.isfile(real_efi_ia32):
+            shutil.copy2(real_efi_ia32, os.path.join(dest_efi, 'BOOTIA32.EFI'))
+            self._log('Replaced BOOTIA32.EFI with standard GRUB (grubia32_real.efi)')
 
         self._log(f'Copying tool directory to EFI/BOOT...')
         tool_src = os.path.join(src, 'tool')
@@ -625,6 +629,101 @@ Write-Output "PART=$($part.PartitionNumber)"
         return False
 
     @staticmethod
+    def _detect_iso_type(fname: str) -> str:
+        lower = fname.lower()
+        if 'winpe' in lower or 'win11' in lower or 'win10' in lower or 'windows' in lower:
+            return 'windows'
+        if 'arch' in lower or 'cachyos' in lower or 'endeavouros' in lower or 'manjaro' in lower:
+            return 'arch'
+        if 'redorescue' in lower or 'systemrescue' in lower:
+            return 'live'
+        if 'ubuntu' in lower or 'linuxmint' in lower or 'pop' in lower or 'zorin' in lower or 'kubuntu' in lower:
+            return 'ubuntu'
+        if 'fedora' in lower or 'nobara' in lower or 'silverblue' in lower:
+            return 'fedora'
+        if 'debian' in lower:
+            return 'debian'
+        return 'generic'
+
+    @staticmethod
+    def _make_entry(fname: str, safe_name: str, itype: str) -> str:
+        iso_path = f'/ISOS/{safe_name}'
+        if itype == 'windows':
+            return (
+                f'menuentry "Boot {safe_name}" --class windows {{\n'
+                f'    insmod loopback\n'
+                f'    insmod iso9660\n'
+                f'    insmod chain\n'
+                f'    set isofile="{iso_path}"\n'
+                f'    loopback loop ($data_root)$isofile\n'
+                f'    chainloader (loop)/efi/boot/bootx64.efi\n'
+                f'    boot\n'
+                f'}}'
+            )
+        if itype == 'arch':
+            return (
+                f'menuentry "Boot {safe_name}" --class arch {{\n'
+                f'    insmod loopback\n'
+                f'    insmod iso9660\n'
+                f'    set isofile="{iso_path}"\n'
+                f'    loopback loop ($data_root)$isofile\n'
+                f'    linux (loop)/arch/boot/x86_64/vmlinuz-linux img_loop=$isofile img_dev=/dev/disk/by-uuid/YOUR_UUID archisobasedir=arch\n'
+                f'    initrd (loop)/arch/boot/x86_64/archiso.img\n'
+                f'}}'
+            )
+        if itype == 'ubuntu':
+            return (
+                f'menuentry "Boot {safe_name}" --class ubuntu {{\n'
+                f'    insmod loopback\n'
+                f'    insmod iso9660\n'
+                f'    set isofile="{iso_path}"\n'
+                f'    loopback loop ($data_root)$isofile\n'
+                f'    linux (loop)/casper/vmlinuz boot=casper iso-scan/filename=$isofile quiet splash ---\n'
+                f'    initrd (loop)/casper/initrd.img\n'
+                f'}}'
+            )
+        if itype == 'live':
+            return (
+                f'menuentry "Boot {safe_name}" --class live {{\n'
+                f'    insmod loopback\n'
+                f'    insmod iso9660\n'
+                f'    set isofile="{iso_path}"\n'
+                f'    loopback loop ($data_root)$isofile\n'
+                f'    linux (loop)/live/vmlinuz boot=live findiso=$isofile components splash\n'
+                f'    initrd (loop)/live/initrd.img\n'
+                f'}}'
+            )
+        if itype == 'fedora':
+            return (
+                f'menuentry "Boot {safe_name}" --class fedora {{\n'
+                f'    insmod loopback\n'
+                f'    insmod iso9660\n'
+                f'    insmod probe\n'
+                f'    set isofile="{iso_path}"\n'
+                f'    loopback loop ($data_root)$isofile\n'
+                f'    probe --set isolabel --label (loop)\n'
+                f'    linux (loop)/images/pxeboot/vmlinuz root=live:CDLABEL=$isolabel rd.live.image iso-scan/filename=$isofile quiet rhgb\n'
+                f'    initrd (loop)/images/pxeboot/initrd.img\n'
+                f'}}'
+            )
+        if itype == 'debian':
+            return (
+                f'menuentry "Boot {safe_name}" --class debian {{\n'
+                f'    insmod loopback\n'
+                f'    insmod iso9660\n'
+                f'    set isofile="{iso_path}"\n'
+                f'    loopback loop ($data_root)$isofile\n'
+                f'    linux (loop)/install.amd/vmlinuz findiso=$isofile\n'
+                f'    initrd (loop)/install.amd/initrd.img\n'
+                f'}}'
+            )
+        return (
+            f'menuentry "Boot {safe_name}" --class iso {{\n'
+            f'    boot_iso "($data_root)" "{iso_path}"\n'
+            f'}}'
+        )
+
+    @staticmethod
     def _generate_iso_menu(data_drive: str):
         iso_dir = os.path.join(data_drive, 'ISOS')
         menu_path = os.path.join(iso_dir, '.iso_menu.cfg')
@@ -637,15 +736,19 @@ Write-Output "PART=$($part.PartitionNumber)"
             if ext not in ('.iso', '.img'):
                 continue
             safe_name = fname.replace('"', '\\"')
-            entries.append(
-                f'menuentry "Boot {safe_name}" --class iso {{\n'
-                f'    boot_iso "($data_root)" "/ISOS/{safe_name}"\n'
-                f'}}'
-            )
+            itype = KoupreyFlashWorker._detect_iso_type(fname)
+            entries.append(KoupreyFlashWorker._make_entry(fname, safe_name, itype))
         with open(menu_path, 'w', encoding='utf-8') as f:
             f.write('# Kouprey Boot ISO menu - auto-generated\n')
-            f.write(f'# {len(entries)} ISO(s) found\n')
+            f.write(f'# {len(entries)} ISO(s) found in /ISOS/\n')
             f.write('# Re-generate: python flash_headless.py -gen-iso-menu -disk N\n')
+            f.write('#\n')
+            f.write('# All entries reference ($data_root) — the DATA partition discovered by grub.cfg.\n')
+            f.write('# Unknown ISO types use the boot_iso function (loopback.cfg → chainload → memdisk).\n')
+            f.write('# If an entry fails, copy the template from:\n')
+            f.write('#   assets/grub/grub/.iso_menu.cfg\n')
+            f.write('# and customize kernel parameters for your ISO.\n')
+            f.write('#\n')
             f.write('\n'.join(entries))
             f.write('\n')
         return len(entries)
