@@ -120,9 +120,9 @@ def do_deploy(disk_number, theme_name):
         letter = p.get('DriveLetter', '')
         label = p.get('Label', '')
         num = p.get('Number', 0)
-        if (label == 'VTOYDATA' or label == 'KoupreyData') and letter:
+        if label == 'KOUPREYDATA':
             data_mount = letter.rstrip('\\')
-        elif label == 'VTOYEFI':
+        elif label == 'KOUPREYESP':
             esp_part_num = num
             if letter:
                 esp_mount = letter.rstrip('\\')
@@ -205,7 +205,7 @@ def do_gen_iso_menu(disk_number):
     for p in partitions:
         label = p.get('Label', '')
         letter = p.get('DriveLetter', '')
-        if label in ('VTOYDATA', 'KoupreyData') and letter:
+        if label == 'KOUPREYDATA' and letter:
             data_drive = letter
             break
     if not data_drive:

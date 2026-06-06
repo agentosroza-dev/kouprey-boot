@@ -534,7 +534,6 @@ class DeployPage(QWidget):
         self._theme_preview.setVisible(bool(name))
         if not name:
             return
-        from scanner import ThemeInfo
         path = self._theme_paths.get(name, '')
         if not path:
             return
@@ -613,6 +612,7 @@ class DeployPage(QWidget):
 
 class SettingsPage(QWidget):
     language_changed = pyqtSignal(str)
+    theme_changed = pyqtSignal(str)
 
     def __init__(self, lang, theme_mgr, parent=None):
         super().__init__(parent)
@@ -704,7 +704,9 @@ class SettingsPage(QWidget):
 
     def _on_theme(self, idx):
         if self._theme_mgr:
-            self._theme_mgr.set_mode(self._theme_combo.currentData())
+            mode = self._theme_combo.currentData()
+            self._theme_mgr.set_mode(mode)
+            self.theme_changed.emit(mode)
 
 
 class KoupreyBootFlashWindow(QMainWindow):
@@ -835,6 +837,7 @@ class KoupreyBootFlashWindow(QMainWindow):
         self._deploy_page._main_win = self
         self._settings_page = SettingsPage(self._lang, self._theme_mgr)
         self._settings_page.language_changed.connect(self._on_settings_lang_changed)
+        self._settings_page.theme_changed.connect(self._on_settings_theme_changed)
 
         self._deploy_page._themes_dir = self._themes_dir
         self._settings_page.set_info(
@@ -953,6 +956,15 @@ class KoupreyBootFlashWindow(QMainWindow):
         self._lang.switch_to(code)
         self._apply_lang_font(code)
         self._retranslate_ui()
+
+    def _on_settings_theme_changed(self, mode: str):
+        self._theme_colors = DARK_COLORS if mode == 'dark' else LIGHT_COLORS
+        self._update_theme_icon()
+        self._update_logo()
+        c = self._current_text_color()
+        self._btn_lang.setIcon(lucide_icon('languages', 18, c))
+        if hasattr(self, '_dash_page'):
+            self._dash_page.set_icon_color(c)
 
     def _apply_lang_font(self, code: str):
         app = QApplication.instance()

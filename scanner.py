@@ -141,13 +141,13 @@ def _detect_windows_drives() -> list[DriveInfo]:
             if ($vol.DriveLetter) {
                 $foundVol = $true
                 $mp = $vol.DriveLetter + ":\\"
-                if ((Test-Path ($mp + "ISOS")) -or ($vol.FileSystemLabel -eq "VTOYDATA") -or ($vol.FileSystemLabel -eq "KoupreyData")) {
+                if ((Test-Path ($mp + "ISOS")) -or ($vol.FileSystemLabel -eq "KOUPREYDATA") -or ($vol.FileSystemLabel -eq "KoupreyData")) {
                     $kouprey = $true
                     $dataMount = $mp
                 } elseif (-not $mount) {
                     $mount = $mp
                 }
-            } elseif ($vol.FileSystemLabel -eq "VTOYEFI") {
+            } elseif ($vol.FileSystemLabel -eq "KOUPREYESP") {
                 $kouprey = $true
             }
         }

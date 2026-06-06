@@ -311,7 +311,7 @@ Write-Output "SHRINK=ok"
         fs_arg = fs_map.get(fs, 'EXFAT')
         ps_format = f'''
 $part = Get-Partition -DiskNumber {disk} | Sort-Object PartitionNumber | Select-Object -First 1
-        $part | Format-Volume -FileSystem {fs_arg} -NewFileSystemLabel "VTOYDATA" -Confirm:$false -ErrorAction Stop
+        $part | Format-Volume -FileSystem {fs_arg} -NewFileSystemLabel "KOUPREYDATA" -Confirm:$false -ErrorAction Stop
         $used = (Get-Volume).DriveLetter | Where-Object {{ $_ }}
 $tChar = if ($used -notcontains 'T') {{ 'T' }} else {{ 90..68 | ForEach-Object {{ [char]$_ }} | Where-Object {{ $_ -notin $used }} | Select-Object -First 1 }}
 Set-Partition -DiskNumber {disk} -PartitionNumber $part.PartitionNumber -NewDriveLetter $tChar -ErrorAction Stop
@@ -542,22 +542,6 @@ Write-Output "PART=$($part.PartitionNumber)"
         if os.path.isdir(tool_src):
             shutil.copytree(tool_src, dest_efi, dirs_exist_ok=True)
 
-        self._log(f'Copying ventoy directory to ESP root...')
-        ventoy_src = os.path.join(src, 'ventoy')
-        dest_ventoy = os.path.join(esp_drive, 'ventoy')
-        if os.path.isdir(ventoy_src):
-            shutil.copytree(ventoy_src, dest_ventoy, dirs_exist_ok=True)
-
-        self._log(f'Copying Ventoy files to DATA partition...')
-        dest_data_ventoy = os.path.join(data_drive, 'ventoy')
-        os.makedirs(dest_data_ventoy, exist_ok=True)
-        ventoy_cpio = os.path.join(src, 'ventoy', 'ventoy.cpio')
-        if os.path.isfile(ventoy_cpio):
-            shutil.copy2(ventoy_cpio, os.path.join(dest_data_ventoy, 'ventoy.cpio'))
-        ventoy_json = os.path.join(dest_data_ventoy, 'ventoy.json')
-        if not os.path.isfile(ventoy_json):
-            with open(ventoy_json, 'w', encoding='utf-8') as f:
-                f.write('{"control":[{"VTOY_DEFAULT_SEARCH_ROOT":"/ISOS"}]}\n')
 
         self._log(f'Copying MOK manager certificate...')
         cert_src = os.path.join(src, 'ENROLL_THIS_KEY_IN_MOKMANAGER.cer')
@@ -570,17 +554,6 @@ Write-Output "PART=$($part.PartitionNumber)"
             shutil.copytree(grub_src, dest_grub, dirs_exist_ok=True)
             self._log(f'GRUB directory copied')
 
-        self._log(f'Copying ventoy.disk to ESP root...')
-        ventoy_src = os.path.join(self._grub_src, 'grub', 'ventoy.disk')
-        if os.path.isfile(ventoy_src):
-            shutil.copy2(ventoy_src, os.path.join(esp_drive, 'ventoy.disk'))
-            self._log(f'ventoy.disk copied to ESP root')
-        else:
-            self._log('Warning: ventoy.disk not found')
-            ventoy_src2 = os.path.join(self._grub_src, 'grub', 'ventoy.disk.img')
-            if os.path.isfile(ventoy_src2):
-                shutil.copy2(ventoy_src2, os.path.join(esp_drive, 'ventoy.disk.img'))
-                self._log('ventoy.disk.img copied (fallback)')
 
         self._log(f'Copying boot.img and core.img.xz to ESP root...')
         boot_img_src = os.path.join(BOOT_SRC, 'boot.img')
