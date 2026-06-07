@@ -141,7 +141,7 @@ def _detect_windows_drives() -> list[DriveInfo]:
             if ($vol.DriveLetter) {
                 $foundVol = $true
                 $mp = $vol.DriveLetter + ":\\"
-                if ((Test-Path ($mp + "ISOS")) -or ($vol.FileSystemLabel -eq "KOUPREYDATA") -or ($vol.FileSystemLabel -eq "KoupreyData")) {
+                if ((Test-Path ($mp + "ISOS")) -or ($vol.FileSystemLabel -eq "KOUPREYDATA")) {
                     $kouprey = $true
                     $dataMount = $mp
                 } elseif (-not $mount) {
@@ -282,7 +282,7 @@ def _theme_pack_name(root: str, themes_dir: str) -> str:
     parts = rel.split(os.sep)
     if len(parts) >= 1:
         name = parts[0]
-        for suffix in ('-ventoy-theme', '-theme', '-ventoy'):
+        for suffix in ( '-theme', '-themes'):
             if name.lower().endswith(suffix):
                 name = name[:-len(suffix)]
                 break
@@ -312,7 +312,7 @@ def list_available_themes(themes_dir: str) -> list[ThemeInfo]:
                     break
             themes.append(ThemeInfo(name=name, path=root, background=bg))
         return sorted(themes, key=lambda t: t.name.lower())
-    return _cached('themes', _fetch, ttl=5)
+    return _cached(f'themes_{themes_dir}', _fetch, ttl=5)
 
 
 

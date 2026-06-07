@@ -8,18 +8,6 @@ from PyQt6.QtWidgets import (
     QSizePolicy, QSpinBox,
 )
 
-_shared_main_win = None
-
-def _get_main_window():
-    if _shared_main_win is not None:
-        return _shared_main_win
-    app = QApplication.instance()
-    if not app:
-        return None
-    for w in app.topLevelWidgets():
-        if isinstance(w, QMainWindow):
-            return w
-    return None
 from PyQt6.QtCore import Qt, QTimer, QSize, pyqtSignal
 from PyQt6.QtGui import QFont, QPixmap, QIcon
 
@@ -397,7 +385,6 @@ class FlashPage(QWidget):
         QTimer.singleShot(3000, lambda: self._progress.setVisible(False))
 
         if ok:
-            from scanner import list_usb_drives
             list_usb_drives(force_refresh=True)
             self._drive.has_kouprey = True
             self._drive_info.setText('Kouprey Boot has been installed!')
@@ -716,9 +703,6 @@ class KoupreyBootFlashWindow(QMainWindow):
         self._theme_mgr = theme_mgr
         self._theme_colors = LIGHT_COLORS
         self._current_page = 'dashboard'
-
-        global _shared_main_win
-        _shared_main_win = self
 
         self.setWindowTitle(lang.get('app_title'))
         self.setMinimumSize(900, 640)
