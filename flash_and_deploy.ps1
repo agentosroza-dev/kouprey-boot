@@ -1,6 +1,5 @@
 param(
-    [int]$DiskNumber = 2,
-    [string]$FileSystem = "exfat"
+    [int]$DiskNumber = 2
 )
 
 Write-Host "============================================"
@@ -14,10 +13,10 @@ pause
 
 # Step 1: Flash
 Write-Host ""
-Write-Host "[Step 1/4] Flashing Kouprey Boot to Disk #${DiskNumber}..."
+Write-Host "[Step 1/4] Flashing Ventoy to Disk #${DiskNumber}..."
 $env:QT_QPA_PLATFORM = "offscreen"
 $env:QT_ENABLE_HIGHDPI_SCALING = "0"
-python.exe "$PSScriptRoot\flash_headless.py" -disk $DiskNumber -fs $FileSystem
+python.exe "$PSScriptRoot\flash_headless.py" -disk $DiskNumber
 if ($LASTEXITCODE -ne 0) {
     Write-Host "FAILED: Flash step failed. Check log." -ForegroundColor Red
     exit 1

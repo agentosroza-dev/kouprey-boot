@@ -17,7 +17,7 @@ from scanner import (
     list_usb_drives, list_available_themes,
     DriveInfo, ThemeInfo,
 )
-from worker import create_flash_worker, DeployWorker
+from worker import create_flash_worker, create_deploy_worker
 
 
 PAGES = [
@@ -46,8 +46,8 @@ class DriveCard(QFrame):
         top = QHBoxLayout()
         top.setSpacing(14)
 
-        icon_name = 'check-circle' if self.drive.has_kouprey else 'hard-drive'
-        icon_color = '#107C10' if self.drive.has_kouprey else '#616161'
+        icon_name = 'check-circle' if self.drive.has_ventoy else 'hard-drive'
+        icon_color = '#107C10' if self.drive.has_ventoy else '#616161'
         icon_lbl = QLabel()
         icon_lbl.setFixedSize(32, 32)
         icon_lbl.setPixmap(lucide_icon(icon_name, 32, icon_color).pixmap(32, 32))
@@ -70,12 +70,12 @@ class DriveCard(QFrame):
         top.addLayout(info, 1)
 
         badge = QFrame()
-        if self.drive.has_kouprey:
+        if self.drive.has_ventoy:
             badge.setStyleSheet(
                 'background: #DFF6DD; border: 1px solid #6CCF6C; '
                 'border-radius: 4px; padding: 4px 12px;'
             )
-            badge_lbl = QLabel('\u2714 Kouprey')
+            badge_lbl = QLabel('\u2714 Ventoy')
             badge_lbl.setStyleSheet(
                 'font-size: 10pt; font-weight: 600; color: #107C10; background: transparent;'
             )
@@ -84,7 +84,7 @@ class DriveCard(QFrame):
                 'background: #FFF3CD; border: 1px solid #FFC107; '
                 'border-radius: 4px; padding: 4px 12px;'
             )
-            badge_lbl = QLabel('\u25cb No Kouprey')
+            badge_lbl = QLabel('\u25cb No Ventoy')
             badge_lbl.setStyleSheet(
                 'font-size: 10pt; font-weight: 600; color: #856404; background: transparent;'
             )
@@ -101,14 +101,14 @@ class DriveCard(QFrame):
 
         layout.addLayout(top)
 
-        if self.drive.has_kouprey:
+        if self.drive.has_ventoy:
             return
 
         actions = QHBoxLayout()
         actions.setSpacing(8)
         actions.addStretch()
 
-        btn_flash = QPushButton('\u26a1 Flash Kouprey')
+        btn_flash = QPushButton('\u26a1 Flash Ventoy')
         btn_flash.setObjectName('btn_accent')
         btn_flash.setFixedHeight(32)
         btn_flash.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -182,10 +182,10 @@ class DashboardPage(QWidget):
             return
 
         self._no_drives.setVisible(False)
-        kouprey_count = sum(1 for d in drives if d.has_kouprey)
+        ventoy_count = sum(1 for d in drives if d.has_ventoy)
         self._summary.setText(
             f'{len(drives)} USB drive(s) detected  \u00b7  '
-            f'{kouprey_count} with Kouprey'
+            f'{ventoy_count} with Ventoy'
         )
         self._last_drives = drives
 
@@ -238,24 +238,6 @@ class FlashPage(QWidget):
         self._status.setObjectName('statusLabel')
         self._status.setWordWrap(True)
         card_layout.addWidget(self._status)
-
-        options_row = QHBoxLayout()
-        options_row.setSpacing(20)
-
-        fs_layout = QVBoxLayout()
-        fs_layout.setSpacing(4)
-        fs_label = QLabel('File System')
-        fs_label.setStyleSheet('font-size: 9pt; color: #616161; background: transparent;')
-        fs_layout.addWidget(fs_label)
-        self._file_system = QComboBox()
-        self._file_system.addItem('exFAT', 'exfat')
-        self._file_system.addItem('NTFS', 'ntfs')
-        self._file_system.addItem('FAT32', 'fat32')
-        fs_layout.addWidget(self._file_system)
-        options_row.addLayout(fs_layout)
-
-        options_row.addStretch()
-        card_layout.addLayout(options_row)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
@@ -313,8 +295,8 @@ class FlashPage(QWidget):
             f'{drive.model} ({drive.size_gb}) \u2013 Disk #{drive.number}'
             + (f' \u2013 {drive.mount_point}' if drive.mount_point else '')
         )
-        if drive.has_kouprey:
-            self._drive_info.setText('Kouprey Boot is installed. Reflash to erase and reinstall.')
+        if drive.has_ventoy:
+            self._drive_info.setText('Ventoy is installed. Reflash to erase and reinstall.')
             self._btn_flash.setText('\u26a1 Reflash')
         else:
             self._drive_info.setText('Ready to flash')
@@ -350,7 +332,6 @@ class FlashPage(QWidget):
 
     def _start(self):
         self._btn_flash.setEnabled(False)
-        self._file_system.setEnabled(False)
         self._progress.setVisible(True)
         self._progress_label.setVisible(True)
         self._progress.setValue(0)
@@ -362,10 +343,7 @@ class FlashPage(QWidget):
             if w:
                 w.setParent(None)
 
-        self._worker = create_flash_worker(
-            self._drive.number,
-            file_system=self._file_system.currentData(),
-        )
+        self._worker = create_flash_worker(self._drive.number)
         self._worker.progress.connect(self._on_progress)
         self._worker.log.connect(self._log)
         self._worker.finished.connect(self._on_finished)
@@ -378,7 +356,6 @@ class FlashPage(QWidget):
         self._progress_label.setText(f'{pct}% - {msg}')
 
     def _on_finished(self, ok: bool, msg: str):
-        self._file_system.setEnabled(True)
         self._progress.setValue(100 if ok else 0)
         self._progress_label.setText('100% - Complete' if ok else f'Failed - {msg}')
         QTimer.singleShot(3000, lambda: self._progress_label.setVisible(False))
@@ -386,8 +363,8 @@ class FlashPage(QWidget):
 
         if ok:
             list_usb_drives(force_refresh=True)
-            self._drive.has_kouprey = True
-            self._drive_info.setText('Kouprey Boot has been installed!')
+            self._drive.has_ventoy = True
+            self._drive_info.setText('Ventoy has been installed!')
             self._btn_flash.setEnabled(False)
             QMessageBox.information(self, 'Success', msg)
         else:
@@ -550,16 +527,12 @@ class DeployPage(QWidget):
 
     def _on_deploy(self):
         data_mp = getattr(self._drive, 'data_mount_point', '')
-        esp_mp = getattr(self._drive, 'mount_point', '')
-        if not self._drive or not (esp_mp or data_mp):
+        if not self._drive or not data_mp:
             QMessageBox.warning(self, '', self._lang.get('deploy_select'))
             return
 
         name = self._theme_combo.currentData()
-        opts = {
-            'theme': name if name else '',
-            'theme_path': self._theme_paths.get(name, '') if name else '',
-        }
+        theme_source = self._theme_paths.get(name, '') if name else ''
 
         self._btn_deploy.setEnabled(False)
         self._progress.setVisible(True)
@@ -573,7 +546,7 @@ class DeployPage(QWidget):
             if w:
                 w.setParent(None)
 
-        self._worker = DeployWorker(self._drive.number, esp_mp, data_mp, self._grub_dir, opts)
+        self._worker = create_deploy_worker(self._drive.number, data_mp, name, theme_source)
         self._worker.progress.connect(self._on_deploy_progress)
         self._worker.log.connect(self._log)
         self._worker.finished.connect(self._on_deploy_finished)
@@ -617,7 +590,7 @@ class SettingsPage(QWidget):
         layout.addWidget(title)
 
         cards = [
-            ('Kouprey Boot', self._info_section()),
+            ('Ventoy', self._info_section()),
             ('settings_language', self._lang_section()),
             ('settings_theme', self._theme_section()),
         ]
@@ -644,9 +617,9 @@ class SettingsPage(QWidget):
         self._info_label.setWordWrap(True)
         l.addWidget(self._info_label)
 
-        self._grub_version = QLabel('GRUB2 v2.14')
-        self._grub_version.setObjectName('statusLabel')
-        l.addWidget(self._grub_version)
+        self._ventoy_version = QLabel('Ventoy v1.1.12')
+        self._ventoy_version.setObjectName('statusLabel')
+        l.addWidget(self._ventoy_version)
         return w
 
     def _lang_section(self):
@@ -675,7 +648,7 @@ class SettingsPage(QWidget):
 
     def set_info(self, path: str, version: str = ''):
         self._info_label.setText(path or 'Kouprey Boot Flash Tool')
-        self._grub_version.setText(f'GRUB2 v{version}' if version else 'GRUB2 v2.14')
+        self._ventoy_version.setText(f'Ventoy v{version}' if version else 'Ventoy v1.1.12')
 
     def _on_lang(self, idx):
         code = self._lang_combo.currentData()
@@ -751,6 +724,7 @@ class KoupreyBootFlashWindow(QMainWindow):
         name = QLabel('Kouprey\nBoot Flash')
         name.setObjectName('titleLabel')
         name.setStyleSheet('font-size: 11pt; font-weight: 600;')
+        name.setToolTip('Ventoy 1.1.12')
         header_row.addWidget(name)
 
         header_row.addStretch()
@@ -825,7 +799,7 @@ class KoupreyBootFlashWindow(QMainWindow):
 
         self._deploy_page._themes_dir = self._themes_dir
         self._settings_page.set_info(
-            'Kouprey Boot Flash Tool', '2.14'
+            'Kouprey Boot Flash Tool', '1.1.12'
         )
 
         self._stack.addWidget(self._dash_page)

@@ -4,7 +4,6 @@ import json
 import time
 import platform
 from typing import Optional
-from functools import partial
 
 
 _CACHE_TTL = 3
@@ -35,7 +34,7 @@ class DriveInfo:
         size_bytes: int,
         is_removable: bool,
         is_usb: bool,
-        has_kouprey: bool = False,
+        has_ventoy: bool = False,
         mount_point: str = '',
         device_path: str = '',
         data_mount_point: str = '',
@@ -45,7 +44,7 @@ class DriveInfo:
         self.size_bytes = size_bytes
         self.is_removable = is_removable
         self.is_usb = is_usb
-        self.has_kouprey = has_kouprey
+        self.has_ventoy = has_ventoy
         self.mount_point = mount_point
         self.device_path = device_path
         self.data_mount_point = data_mount_point
@@ -134,32 +133,32 @@ def _detect_windows_drives() -> list[DriveInfo]:
         $parts = Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue
         $mount = ""
         $dataMount = ""
-        $kouprey = $false
-        $foundVol = $false
+        $hasVentoy = $false
         foreach ($part in $parts) {
             $vol = Get-Volume -Partition $part -ErrorAction SilentlyContinue
             if ($vol.DriveLetter) {
-                $foundVol = $true
                 $mp = $vol.DriveLetter + ":\\"
-                if ((Test-Path ($mp + "ISOS")) -or ($vol.FileSystemLabel -eq "KOUPREYDATA")) {
-                    $kouprey = $true
+                if ($vol.FileSystemLabel -eq "VTOYEFI") {
+                    $hasVentoy = $true
+                    $mount = $mp
+                } elseif (Test-Path ($mp + "ventoy\\ventoy.json")) {
+                    $hasVentoy = $true
                     $dataMount = $mp
                 } elseif (-not $mount) {
                     $mount = $mp
                 }
-            } elseif ($vol.FileSystemLabel -eq "KPEFI") {
-                $kouprey = $true
+            } else {
+                if ($vol.FileSystemLabel -eq "VTOYEFI") {
+                    $hasVentoy = $true
+                }
             }
-            # Also check for mount points (folder-based mount)
-            if ($part.AccessPaths) {
-                foreach ($ap in $part.AccessPaths) {
-                    if ($ap -ne $part.PartitionNumber -and $ap -ne "\\\\.\\$($part.Guid)" -and $ap -match '^[A-Z]:\\' -and $ap -ne $mount) {
-                        $mp2 = $ap
-                        if ((Test-Path ($mp2 + "ISOS")) -or (Test-Path ($mp2 + "grub"))) {
-                            $kouprey = $true
-                            if (-not $dataMount) { $dataMount = $mp2 }
-                        }
-                    }
+        }
+        if ($hasVentoy -and -not $dataMount) {
+            foreach ($part in $parts) {
+                $vol = Get-Volume -Partition $part -ErrorAction SilentlyContinue
+                if ($vol.DriveLetter -and $vol.FileSystemLabel -ne "VTOYEFI") {
+                    $dataMount = $vol.DriveLetter + ":\\"
+                    break
                 }
             }
         }
@@ -171,7 +170,7 @@ def _detect_windows_drives() -> list[DriveInfo]:
             BusType = $disk.BusType.ToString()
             MountPoint = $mount
             DataMountPoint = $dataMount
-            HasKouprey = $kouprey
+            HasVentoy = $hasVentoy
         }
     }
     $result | ConvertTo-Json
@@ -196,7 +195,7 @@ def _detect_windows_drives() -> list[DriveInfo]:
             size_bytes=item.get('Size', 0),
             is_removable=item.get('Removable', False),
             is_usb=item.get('BusType') == 'USB',
-            has_kouprey=item.get('HasKouprey', False),
+            has_ventoy=item.get('HasVentoy', False),
             mount_point=item.get('MountPoint', ''),
             data_mount_point=item.get('DataMountPoint', ''),
             device_path=f'\\\\.\\PhysicalDrive{num}',
@@ -208,7 +207,7 @@ def _detect_linux_drives() -> list[DriveInfo]:
     drives = []
     try:
         result = subprocess.run(
-            ['lsblk', '-J', '-o', 'NAME,SIZE,TYPE,MODEL,MOUNTPOINT,TRAN'],
+            ['lsblk', '-J', '-o', 'NAME,SIZE,TYPE,MODEL,MOUNTPOINT,TRAN,LABEL'],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
@@ -241,23 +240,14 @@ def _detect_linux_drives() -> list[DriveInfo]:
         size_bytes = _parse_lsblk_size(size_str)
         mount = mount_points[0] if mount_points else ''
 
-        has_kouprey = False
+        has_ventoy = False
+        data_mount = ''
         for mp in mount_points:
-            marker_dirs = [
-                os.path.join(mp, 'ISOS', 'DUMMY'),
-                os.path.join(mp, 'ISOS', '.iso_menu.cfg'),
-                os.path.join(mp, 'themes', '.marker'),
-            ]
-            marker_efi = (
-                os.path.isfile(os.path.join(mp, 'EFI', 'BOOT', 'BOOTX64.EFI')) and
-                os.path.isfile(os.path.join(mp, 'grub', 'x86_64-efi', 'normal.mod'))
-            )
-            if marker_efi or any(os.path.isfile(p) for p in marker_dirs):
-                has_kouprey = True
+            if os.path.isfile(os.path.join(mp, 'ventoy', 'ventoy.json')):
+                has_ventoy = True
+                data_mount = mp
                 mount = mp
                 break
-        if not mount_points:
-            has_kouprey = True
 
         drives.append(DriveInfo(
             number=0,
@@ -265,8 +255,9 @@ def _detect_linux_drives() -> list[DriveInfo]:
             size_bytes=size_bytes,
             is_removable=True,
             is_usb=True,
-            has_kouprey=has_kouprey,
+            has_ventoy=has_ventoy,
             mount_point=mount,
+            data_mount_point=data_mount,
             device_path=f'/dev/{name}',
         ))
 
@@ -332,6 +323,3 @@ def list_available_themes(themes_dir: str) -> list[ThemeInfo]:
             themes.append(ThemeInfo(name=name, path=root, background=bg))
         return sorted(themes, key=lambda t: t.name.lower())
     return _cached(f'themes_{themes_dir}', _fetch, ttl=5)
-
-
-

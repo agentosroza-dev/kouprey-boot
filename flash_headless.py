@@ -1,11 +1,11 @@
-"""Headless flash and deploy script for Kouprey Boot.
+"""Headless flash and deploy script for Kouprey Boot (Ventoy).
 Usage:
-  flash_headless.py -disk 2 -fs exfat              # Flash USB
+  flash_headless.py -disk 2              # Flash USB with Ventoy
   flash_headless.py -deploy -disk 2 -theme Vimix    # Deploy theme
   flash_headless.py -deploy -disk 2 -theme Bigsur   # Deploy theme
   flash_headless.py -deploy -disk 2 -theme Window11 # Deploy theme
 """
-import os, sys, argparse, datetime, tempfile, shutil, re
+import os, sys, argparse, datetime, tempfile, json, subprocess
 
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '0'
@@ -16,9 +16,10 @@ os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication
-from worker import create_flash_worker, DeployWorker
+from worker import create_flash_worker, create_deploy_worker
 
 LOG_DIR = os.path.join(tempfile.gettempdir(), 'kouprey-boot')
+
 
 def log(msg, log_path=None):
     ts = datetime.datetime.now().strftime('%H:%M:%S')
@@ -31,10 +32,11 @@ def log(msg, log_path=None):
         except Exception:
             pass
 
-def do_flash(disk_number, file_system):
+
+def do_flash(disk_number):
     os.makedirs(LOG_DIR, exist_ok=True)
     log_path = os.path.join(LOG_DIR, f'flash_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
-    log(f'=== FLASH: Disk #{disk_number}, FS={file_system} ===', log_path)
+    log(f'=== FLASH: Disk #{disk_number} ===', log_path)
 
     app = QApplication(sys.argv)
     result = {'ok': False, 'msg': ''}
@@ -51,7 +53,7 @@ def do_flash(disk_number, file_system):
         log(f'  FINISHED: ok={ok}', log_path)
         app.quit()
 
-    worker = create_flash_worker(disk_number, file_system)
+    worker = create_flash_worker(disk_number)
     worker.progress.connect(on_progress)
     worker.log.connect(on_log)
     worker.finished.connect(on_finished)
@@ -69,26 +71,24 @@ def do_flash(disk_number, file_system):
         log(f'ERROR: {result["msg"]}', log_path)
     return result['ok'], result['msg']
 
+
 def do_deploy(disk_number, theme_name):
     os.makedirs(LOG_DIR, exist_ok=True)
     log_path = os.path.join(LOG_DIR, f'deploy_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
     log(f'=== DEPLOY: Disk #{disk_number}, Theme={theme_name} ===', log_path)
 
     from scanner import list_available_themes
-    import os as _os
 
-    themes = list_available_themes(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), 'themes'))
+    themes = list_available_themes(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'themes'))
     theme_map = {t.name: t.path for t in themes}
     if theme_name not in theme_map:
         log(f'ERROR: Theme "{theme_name}" not found. Available: {list(theme_map.keys())}', log_path)
         return False, f'Theme "{theme_name}" not found'
 
-    theme_path = theme_map[theme_name]
-    log(f'Theme path: {theme_path}', log_path)
+    theme_source = theme_map[theme_name]
+    log(f'Theme source: {theme_source}', log_path)
 
-    # Determine mount points from the USB drive
-    import subprocess, json
-    ps_script = f'''
+    proc = subprocess.run(['powershell', '-NoProfile', '-Command', f'''
     $disk = Get-Disk -Number {disk_number} -ErrorAction SilentlyContinue
     if (-not $disk) {{ exit 1 }}
     $parts = Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue
@@ -104,42 +104,26 @@ def do_deploy(disk_number, theme_name):
         }}
     }}
     $result | ConvertTo-Json
-    '''
-    proc = subprocess.run(['powershell', '-NoProfile', '-Command', ps_script],
-                          capture_output=True, text=True, timeout=15,
-                          creationflags=subprocess.CREATE_NO_WINDOW)
+    '''], capture_output=True, text=True, timeout=15,
+        creationflags=subprocess.CREATE_NO_WINDOW)
+
     if proc.returncode != 0:
         log(f'ERROR: Could not query disk #{disk_number}', log_path)
         return False, 'Could not query disk'
 
     partitions = json.loads(proc.stdout) if proc.stdout.strip() else []
     data_mount = ''
-    esp_mount = ''
-    esp_part_num = 0
     for p in partitions:
-        letter = p.get('DriveLetter', '')
         label = p.get('Label', '')
-        num = p.get('Number', 0)
-        if label == 'KOUPREYDATA':
+        letter = p.get('DriveLetter', '')
+        if label not in ('VTOYEFI', '') and letter and not data_mount:
             data_mount = letter.rstrip('\\')
-        elif label == 'KPEFI':
-            esp_part_num = num
-            if letter:
-                esp_mount = letter.rstrip('\\')
-
-    log(f'  data_mount="{data_mount}" esp_part_num={esp_part_num}', log_path)
 
     if not data_mount:
-        # Try fallback: first partition with a letter
-        for p in partitions:
-            letter = p.get('DriveLetter', '')
-            if letter:
-                data_mount = letter.rstrip('\\')
-                break
+        log('ERROR: No data partition found', log_path)
+        return False, 'No data partition found'
 
-    if not data_mount:
-        log('ERROR: No mounted DATA partition found', log_path)
-        return False, 'No mounted DATA partition found'
+    log(f'  data_mount="{data_mount}"', log_path)
 
     app = QApplication(sys.argv)
     result = {'ok': False, 'msg': ''}
@@ -155,8 +139,7 @@ def do_deploy(disk_number, theme_name):
         result['msg'] = msg
         app.quit()
 
-    options = {'theme': theme_name, 'theme_path': theme_path}
-    worker = DeployWorker(disk_number, esp_mount, data_mount, '', options)
+    worker = create_deploy_worker(disk_number, data_mount, theme_name, theme_source)
     worker.progress.connect(on_progress)
     worker.log.connect(on_log)
     worker.finished.connect(on_finished)
@@ -174,66 +157,18 @@ def do_deploy(disk_number, theme_name):
         log(f'ERROR: {result["msg"]}', log_path)
     return result['ok'], result['msg']
 
-def do_gen_iso_menu(disk_number):
-    """Regenerate .iso_menu.cfg on an already-flashed USB."""
-    import subprocess, json
-    ps_script = f'''
-    $disk = Get-Disk -Number {disk_number} -ErrorAction SilentlyContinue
-    if (-not $disk) {{ exit 1 }}
-    $parts = Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue
-    $result = @()
-    foreach ($part in $parts) {{
-        $vol = Get-Volume -Partition $part -ErrorAction SilentlyContinue
-        $letter = if ($vol.DriveLetter) {{ $vol.DriveLetter + ":\\" }} else {{ "" }}
-        $label = if ($vol.FileSystemLabel) {{ $vol.FileSystemLabel }} else {{ "" }}
-        $result += [PSCustomObject]@{{
-            DriveLetter = $letter
-            Label = $label
-        }}
-    }}
-    $result | ConvertTo-Json
-    '''
-    proc = subprocess.run(['powershell', '-NoProfile', '-Command', ps_script],
-                          capture_output=True, text=True, timeout=15,
-                          creationflags=subprocess.CREATE_NO_WINDOW)
-    if proc.returncode != 0:
-        print('ERROR: Could not query disk')
-        return False
-
-    partitions = json.loads(proc.stdout) if proc.stdout.strip() else []
-    data_drive = ''
-    for p in partitions:
-        label = p.get('Label', '')
-        letter = p.get('DriveLetter', '')
-        if label == 'KOUPREYDATA' and letter:
-            data_drive = letter
-            break
-    if not data_drive:
-        print('ERROR: DATA partition not found')
-        return False
-
-    from worker import KoupreyFlashWorker
-    data_path = data_drive if data_drive.endswith('\\') else data_drive + '\\'
-    KoupreyFlashWorker._generate_iso_menu(data_path)
-    print(f'OK: ISO menu regenerated on {data_drive}')
-    return True
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Kouprey Boot Flash/Deploy Tool')
     parser.add_argument('-disk', type=int, default=2, help='Disk number')
-    parser.add_argument('-fs', default='exfat', choices=['exfat', 'ntfs', 'fat32'], help='File system')
     parser.add_argument('-deploy', action='store_true', help='Deploy theme mode')
     parser.add_argument('-theme', default='Vimix', help='Theme name to deploy')
-    parser.add_argument('-gen-iso-menu', action='store_true', help='Regenerate ISO menu on DATA partition')
 
     args = parser.parse_args()
 
-    if args.gen_iso_menu:
-        ok = do_gen_iso_menu(args.disk)
-    elif args.deploy:
+    if args.deploy:
         ok, msg = do_deploy(args.disk, args.theme)
     else:
-        ok, msg = do_flash(args.disk, args.fs)
+        ok, msg = do_flash(args.disk)
 
     sys.exit(0 if ok else 1)
