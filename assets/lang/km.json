@@ -99,5 +99,7 @@
   "flash_rename_fail": "ការប្តូរឈ្មោះភាគថាសបរាជ័យ",
   "flash_all_done": "ដំណើរការដុតបានបញ្ចប់ដោយជោគជ័យ! ប្រធានបទត្រូវបានដំឡើង ហើយភាគថាសត្រូវបានប្តូរឈ្មោះទៅជា KOUPREYDATA។",
   "english": "English",
-  "khmer": "ភាសាខ្មែរ"
+  "khmer": "ភាសាខ្មែរ",
+  "flash_mode_ventoy": "ស្តង់ដារ (Ventoy2Disk)",
+  "flash_mode_custom": "ផ្ទាល់ខ្លួន (diskpart + raw write)"
 }

@@ -99,5 +99,7 @@
   "flash_rename_fail": "Failed to rename drive",
   "flash_all_done": "Flash complete! Theme applied and drive renamed to KOUPREYDATA.",
   "english": "English",
-  "khmer": "\u1797\u17b6\u179f\u17b6\u1781\u17d2\u1798\u17c2\u179a"
+  "khmer": "\u1797\u17b6\u179f\u17b6\u1781\u17d2\u1798\u17c2\u179a",
+  "flash_mode_ventoy": "Standard (Ventoy2Disk)",
+  "flash_mode_custom": "Custom (diskpart + raw write)"
 }

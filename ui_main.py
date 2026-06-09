@@ -242,6 +242,17 @@ class FlashPage(QWidget):
         self._status.setWordWrap(True)
         card_layout.addWidget(self._status)
 
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(8)
+        self._flash_mode = QComboBox()
+        self._flash_mode.addItem(self._lang.get('flash_mode_ventoy'), 'ventoy')
+        self._flash_mode.addItem(self._lang.get('flash_mode_custom'), 'custom')
+        self._flash_mode.setFixedWidth(200)
+        self._flash_mode.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        mode_row.addWidget(self._flash_mode)
+        mode_row.addStretch()
+        card_layout.addLayout(mode_row)
+
         btn_row = QHBoxLayout()
         btn_row.setSpacing(10)
         self._btn_flash = QPushButton(self._lang.get('flash_btn'))
@@ -358,7 +369,8 @@ class FlashPage(QWidget):
             if w:
                 w.setParent(None)
 
-        self._worker = create_flash_worker(self._drive.number)
+        mode = self._flash_mode.currentData()
+        self._worker = create_flash_worker(self._drive.number, mode)
         self._worker.progress.connect(self._on_progress)
         self._worker.log.connect(self._log)
         self._worker.finished.connect(self._on_finished)
@@ -1044,6 +1056,8 @@ class KoupreyBootFlashWindow(QMainWindow):
         self._dash_page._refresh_btn.setText(lang.get('btn_refresh'))
 
         self._flash_page._drive_info.setText(lang.get('flash_select'))
+        self._flash_page._flash_mode.setItemText(0, lang.get('flash_mode_ventoy'))
+        self._flash_page._flash_mode.setItemText(1, lang.get('flash_mode_custom'))
 
         self._deploy_page._drive_info.setText(lang.get('deploy_select'))
 
