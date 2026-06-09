@@ -37,6 +37,7 @@ def main():
         return
 
     app = QApplication(sys.argv)
+    app.setStyle('Fusion')
 
     if sys_name not in ('Windows', 'Linux'):
         msg = QMessageBox()
@@ -59,13 +60,13 @@ def main():
         font = QFont('Ubuntu', 11)
         font.setFamilies(['Ubuntu', 'Noto Sans', 'sans-serif'])
     else:
-        font = QFont('Segoe UI', 11)
+        font = QFont('Leelawadee UI', 11)
     font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
     app.setFont(font)
 
     lang_dir = os.path.join(os.path.dirname(__file__), 'assets', 'lang')
     lang = LanguageManager(lang_dir)
-    lang.switch_to('en')
+    lang.switch_to('km')
 
     theme_mgr = ThemeManager(app)
     theme_mgr.set_mode('light')

@@ -6,9 +6,9 @@ from typing import Optional
 class LanguageManager:
     def __init__(self, lang_dir: str):
         self.lang_dir = lang_dir
-        self.current_lang = 'en'
+        self.current_lang = 'km'
         self.strings = {}
-        self._load('en')
+        self._load('km')
 
     def _load(self, lang_code: str):
         filepath = os.path.join(self.lang_dir, lang_code + '.json')

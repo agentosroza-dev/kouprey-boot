@@ -192,6 +192,19 @@ class VentoyDeployWorker(QThread):
         return True
 
 
+def rename_volume(drive_letter: str, new_label: str) -> bool:
+    try:
+        result = subprocess.run(
+            ['powershell', '-NoProfile', '-Command',
+             f'Set-Volume -DriveLetter "{drive_letter}" -NewFileSystemLabel "{new_label}"'],
+            capture_output=True, text=True, timeout=30,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 def create_flash_worker(disk_number: int) -> VentoyFlashWorker:
     return VentoyFlashWorker(disk_number)
 
