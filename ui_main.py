@@ -214,7 +214,6 @@ class FlashPage(QWidget):
         self._worker = None
         self._drive = None
         self._mode = ''
-        self._theme_paths = {}
         self._deploy_worker = None
         self._build()
 
@@ -266,57 +265,16 @@ class FlashPage(QWidget):
         progress_row.addWidget(self._progress_label)
         card_layout.addLayout(progress_row)
 
-        self._theme_section = QFrame()
-        self._theme_section.setVisible(False)
-        ts_layout = QVBoxLayout(self._theme_section)
-        ts_layout.setContentsMargins(0, 8, 0, 0)
-        ts_layout.setSpacing(10)
-
-        sep = QFrame()
-        sep.setFixedHeight(1)
-        sep.setStyleSheet('background: #E0E0E0;')
-        ts_layout.addWidget(sep)
-
-        theme_label = QLabel(self._lang.get('flash_select_theme'))
-        theme_label.setStyleSheet('font-size: 11pt; font-weight: 600;')
-        ts_layout.addWidget(theme_label)
-
-        self._theme_combo = QComboBox()
-        self._theme_combo.addItem(self._lang.get('theme_default'), '')
-        ts_layout.addWidget(self._theme_combo)
-
-        self._theme_preview = QLabel()
-        self._theme_preview.setFixedHeight(80)
-        self._theme_preview.setStyleSheet(
-            'background: #2C2C2C; border-radius: 8px; color: #ABABAB;'
-            ' font-size: 9pt; padding: 8px;'
-        )
-        self._theme_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._theme_preview.setVisible(False)
-        ts_layout.addWidget(self._theme_preview)
-
-        theme_btn_row = QHBoxLayout()
-        self._btn_apply_theme = QPushButton(self._lang.get('flash_deploy_theme'))
-        self._btn_apply_theme.setObjectName('btn_accent')
-        self._btn_apply_theme.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._btn_apply_theme.setIcon(lucide_icon('palette', 16, '#ffffff'))
-        self._btn_apply_theme.setFixedHeight(34)
-        theme_btn_row.addWidget(self._btn_apply_theme)
-        theme_btn_row.addStretch()
-        ts_layout.addLayout(theme_btn_row)
-
         self._deploy_progress = QProgressBar()
         self._deploy_progress.setVisible(False)
         self._deploy_progress.setFixedHeight(6)
         self._deploy_progress.setTextVisible(False)
-        ts_layout.addWidget(self._deploy_progress)
+        card_layout.addWidget(self._deploy_progress)
 
         self._deploy_progress_label = QLabel('')
         self._deploy_progress_label.setObjectName('statusLabel')
         self._deploy_progress_label.setVisible(False)
-        ts_layout.addWidget(self._deploy_progress_label)
-
-        card_layout.addWidget(self._theme_section)
+        card_layout.addWidget(self._deploy_progress_label)
 
         layout.addWidget(card)
 
@@ -345,8 +303,6 @@ class FlashPage(QWidget):
         layout.addStretch()
 
         self._btn_flash.clicked.connect(self._on_flash)
-        self._btn_apply_theme.clicked.connect(self._on_apply_theme)
-        self._theme_combo.currentIndexChanged.connect(self._on_theme_selected)
 
     def set_drive(self, drive: DriveInfo):
         self._drive = drive
@@ -361,7 +317,6 @@ class FlashPage(QWidget):
             self._drive_info.setText(self._lang.get('flash_ready'))
             self._btn_flash.setText(self._lang.get('flash_btn'))
         self._btn_flash.setEnabled(True)
-        self._theme_section.setVisible(False)
 
     def _log(self, msg: str):
         lbl = QLabel(msg)
@@ -397,7 +352,6 @@ class FlashPage(QWidget):
         self._progress.setValue(0)
         self._progress_label.setText(f'0% - {self._lang.get("flash_starting")}')
         self._progress_steps = 0
-        self._theme_section.setVisible(False)
 
         for i in reversed(range(self._log_area.count())):
             w = self._log_area.itemAt(i).widget()
@@ -429,55 +383,27 @@ class FlashPage(QWidget):
             self._drive.has_ventoy = True
             self._drive_info.setText(self._lang.get('flash_ventoy_done'))
             self._btn_flash.setEnabled(False)
-            self._load_themes()
-            self._theme_section.setVisible(True)
+            self._log(self._lang.get('flash_deploying_theme'))
+            QTimer.singleShot(500, self._auto_deploy)
         else:
             self._btn_flash.setEnabled(True)
             QMessageBox.critical(self, self._lang.get('error'), msg)
 
-    def _load_themes(self):
-        self._theme_combo.clear()
-        self._theme_combo.addItem(self._lang.get('theme_default'), '')
-        self._theme_paths.clear()
+    _deploy_steps = 0
 
+    def _auto_deploy(self):
+        name = 'Vimix'
         base = getattr(sys, '_MEIPASS', os.path.dirname(__file__))
         themes_dir = os.path.join(base, 'themes')
         themes = list_available_themes(themes_dir)
+        theme_source = ''
         for t in themes:
-            self._theme_combo.addItem(t.name, t.name)
-            self._theme_paths[t.name] = t.path
+            if t.name == name:
+                theme_source = t.path
+                break
 
-    def _on_theme_selected(self, idx):
-        name = self._theme_combo.currentData()
-        self._theme_preview.setVisible(bool(name))
-        if not name:
-            return
-        path = self._theme_paths.get(name, '')
-        if not path:
-            return
-        ti = ThemeInfo(name=name, path=path)
-        bg = ti.background_path
-        title = ti.title
-        if bg and os.path.isfile(bg):
-            pm = QPixmap(bg)
-            if not pm.isNull():
-                scaled = pm.scaled(
-                    320, 76, Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation)
-                self._theme_preview.setPixmap(scaled)
-                self._theme_preview.setToolTip(f'{name}\n{title}')
-                self._theme_preview.setFixedHeight(80)
-                return
-        self._theme_preview.setText(f'{name}\n{title}')
-        self._theme_preview.setToolTip('')
-
-    _deploy_steps = 0
-
-    def _on_apply_theme(self):
-        name = self._theme_combo.currentData()
-        theme_source = self._theme_paths.get(name, '') if name else ''
-
-        if not name or not theme_source:
+        if not theme_source:
+            self._log(f'Theme "{name}" not found, skipping deploy')
             self._do_rename()
             return
 
@@ -500,7 +426,6 @@ class FlashPage(QWidget):
             QMessageBox.critical(self, self._lang.get('error'), self._lang.get('flash_no_data_error'))
             return
 
-        self._btn_apply_theme.setEnabled(False)
         self._deploy_progress.setVisible(True)
         self._deploy_progress_label.setVisible(True)
         self._deploy_progress.setValue(0)
@@ -526,10 +451,9 @@ class FlashPage(QWidget):
         )
 
         if ok:
-            self._log(self._lang.get('flash_theme_success').format(name=self._theme_combo.currentData()))
+            self._log(self._lang.get('flash_theme_success').format(name='Vimix'))
             QTimer.singleShot(1000, self._do_rename)
         else:
-            self._btn_apply_theme.setEnabled(True)
             self._log(self._lang.get('flash_theme_failed').format(msg=msg))
             QMessageBox.critical(self, self._lang.get('error'), msg)
 
@@ -560,7 +484,7 @@ class FlashPage(QWidget):
 
     def _finish_all(self, rename_ok: bool):
         list_usb_drives(force_refresh=True)
-        self._btn_apply_theme.setEnabled(False)
+        self._btn_flash.setEnabled(False)
         QTimer.singleShot(2000, lambda: self._deploy_progress.setVisible(False))
         QTimer.singleShot(2000, lambda: self._deploy_progress_label.setVisible(False))
 
