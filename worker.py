@@ -5,7 +5,6 @@ import shutil
 import platform
 import tempfile
 import datetime
-import lzma
 import time
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -19,8 +18,7 @@ def _create_log_file(prefix: str) -> str:
 
 
 _base = getattr(sys, '_MEIPASS', os.path.dirname(__file__))
-GRUB_SRC = os.path.join(_base, 'assets', 'grub')
-BOOT_SRC = os.path.join(_base, 'assets', 'boot')
+GRUB_SRC = os.path.join(_base, 'assets', 'boot')
 
 
 def _run_diskpart(commands: list[str], disk: int, timeout: int = 30) -> tuple[str, int]:
@@ -59,56 +57,6 @@ def _run_powershell(script: str, timeout: int = 30) -> tuple[str, int]:
         return 'Command timed out', -1
     except Exception as e:
         return f'Process error: {e}', -1
-
-
-def _open_disk(disk_number: int):
-    import ctypes
-    handle = ctypes.windll.kernel32.CreateFileW(
-        f'\\\\.\\PhysicalDrive{disk_number}',
-        0xC0000000,
-        0x00000003,
-        None, 3,
-        0x80, None,
-    )
-    if handle == -1 or handle is None:
-        raise RuntimeError(f'Cannot open PhysicalDrive{disk_number}')
-    return handle
-
-
-def _close_disk(handle):
-    import ctypes
-    ctypes.windll.kernel32.CloseHandle(handle)
-
-
-def _seek_disk(handle, byte_offset: int):
-    import ctypes
-    ctypes.windll.kernel32.SetFilePointerEx(handle, ctypes.c_longlong(byte_offset), None, 0)
-
-
-def _read_raw_disk(disk_number: int, size: int, byte_offset: int = 0) -> bytes:
-    import ctypes
-    handle = _open_disk(disk_number)
-    try:
-        _seek_disk(handle, byte_offset)
-        buf = ctypes.create_string_buffer(size)
-        read = ctypes.c_ulong(0)
-        ctypes.windll.kernel32.ReadFile(handle, buf, size, ctypes.byref(read), None)
-        return buf.raw[:read.value]
-    finally:
-        _close_disk(handle)
-
-
-def _write_raw_disk(disk_number: int, data: bytes, byte_offset: int = 0):
-    import ctypes
-    handle = _open_disk(disk_number)
-    try:
-        _seek_disk(handle, byte_offset)
-        written = ctypes.c_ulong(0)
-        ok = ctypes.windll.kernel32.WriteFile(handle, data, len(data), ctypes.byref(written), None)
-        if not ok:
-            raise RuntimeError(f'WriteFile failed on PhysicalDrive{disk_number} at offset {byte_offset}')
-    finally:
-        _close_disk(handle)
 
 
 def _suppress_format_dialogs():
@@ -285,34 +233,29 @@ Write-Output "GPT initialized"
         self._log('GPT partition table created')
         self.progress.emit('Creating partitions...')
 
-        self._log('Step 3: Creating DATA partition (Ventoy partition 1)...')
+        self._log('Step 3: Creating ESP partition (64 MB FAT32)...')
+        out, rc = _run_diskpart(['create partition efi size=64'], disk, timeout=60)
+        if rc != 0:
+            self._last_error = out or 'ESP partition creation failed'
+            self._log(f'ESP partition creation failed: {self._last_error}')
+            return False
+        self._log('ESP partition created')
+
+        self._log('Step 4: Creating DATA partition...')
         out, rc = _run_diskpart(['create partition primary'], disk, timeout=60)
         if rc != 0:
             self._last_error = out or 'DATA partition creation failed'
             self._log(f'DATA partition creation failed: {self._last_error}')
             return False
-        self._log('DATA partition created, shrinking to make room for ESP + BIOS Boot...')
-
-        ps_shrink = f'''
-$part = Get-Partition -DiskNumber {disk} | Sort-Object PartitionNumber | Select-Object -First 1
-$newSize = $part.Size - 70MB
-Resize-Partition -DiskNumber {disk} -PartitionNumber $part.PartitionNumber -Size $newSize -ErrorAction Stop
-Set-Partition -DiskNumber {disk} -PartitionNumber $part.PartitionNumber -NoDefaultDriveLetter $true -ErrorAction SilentlyContinue
-Write-Output "SHRINK=ok"
-'''
-        out, rc = _run_powershell(ps_shrink, timeout=30)
-        if rc != 0 or 'Error' in out:
-            self._last_error = out or 'Shrink DATA partition failed'
-            self._log(f'Shrink DATA partition failed: {self._last_error}')
-            return False
-        self._log('DATA partition shrunk (freed 70 MB)')
+        self._log('DATA partition created')
 
         fs_map = {'exfat': 'EXFAT', 'ntfs': 'NTFS', 'fat32': 'FAT32'}
         fs_arg = fs_map.get(fs, 'EXFAT')
         ps_format = f'''
-$part = Get-Partition -DiskNumber {disk} | Sort-Object PartitionNumber | Select-Object -First 1
-        $part | Format-Volume -FileSystem {fs_arg} -NewFileSystemLabel "KOUPREYDATA" -Confirm:$false -ErrorAction Stop
-        $used = (Get-Volume).DriveLetter | Where-Object {{ $_ }}
+$part = Get-Partition -DiskNumber {disk} | Where-Object {{ $_.GptType -eq "{{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}}" }} | Select-Object -First 1
+if (-not $part) {{ $part = Get-Partition -DiskNumber {disk} | Where-Object {{ $_.Type -eq "Basic" }} | Select-Object -First 1 }}
+$part | Format-Volume -FileSystem {fs_arg} -NewFileSystemLabel "KOUPREYDATA" -Confirm:$false -ErrorAction Stop
+$used = (Get-Volume).DriveLetter | Where-Object {{ $_ }}
 $tChar = if ($used -notcontains 'T') {{ 'T' }} else {{ 90..68 | ForEach-Object {{ [char]$_ }} | Where-Object {{ $_ -notin $used }} | Select-Object -First 1 }}
 Set-Partition -DiskNumber {disk} -PartitionNumber $part.PartitionNumber -NewDriveLetter $tChar -ErrorAction Stop
 $dataDrive = $tChar + ":\\"
@@ -331,90 +274,13 @@ Write-Output "DATA=$dataDrive"
         self._log(f'DATA formatted at {data_drive}')
         self.progress.emit('DATA created...')
 
-        self._log('Step 4: Creating ESP partition (64 MB FAT32)...')
-        out, rc = _run_diskpart(['create partition efi size=64'], disk, timeout=60)
-        if rc != 0:
-            self._last_error = out or 'ESP partition creation failed'
-            self._log(f'ESP partition creation failed: {self._last_error}')
-            return False
-        self._log('ESP partition created (will format after BIOS Boot)')
-
-        self._log('Step 5: Creating BIOS Boot Partition (2 MB, partition 3)...')
-        out, rc = _run_diskpart([
-            'create partition primary size=2',
-            'set id=21686148-6449-6E6F-744E-656564454649 override',
-            'gpt attributes=0x8000000000000000',
-        ], disk, timeout=30)
-        if rc != 0:
-            self._last_error = out or 'BIOS Boot partition creation failed'
-            self._log(f'BIOS Boot partition creation failed: {self._last_error}')
-            return False
-        self._log('BIOS Boot partition created (bios_grub type, no auto-drive-letter)')
-        self.progress.emit('Creating partitions...')
-
-        self._log('Step 5b: Querying BIOS Boot Partition geometry...')
-        ps_bios_info = f'''
-$part = Get-Partition -DiskNumber {disk} | Where-Object {{ $_.GptType -eq "{{21686148-6449-6E6F-744E-656564454649}}" }} | Select-Object -First 1
-if (-not $part) {{ $part = Get-Partition -DiskNumber {disk} | Sort-Object PartitionNumber -Descending | Select-Object -First 1 }}
-Write-Output "OFFSET=$($part.Offset)"
-Write-Output "LBA=$([int]($part.Offset / 512))"
-Write-Output "SECTORS=$($part.Size / 512)"
-'''
-        out, rc = _run_powershell(ps_bios_info, timeout=10)
-        bios_lba = 34
-        bios_offset = 0
-        bios_sectors = 4096
-        for line in out.split('\n'):
-            line = line.strip()
-            if line.startswith('OFFSET='):
-                bios_offset = int(line.split('=', 1)[1].strip())
-            elif line.startswith('LBA='):
-                bios_lba = int(line.split('=', 1)[1].strip())
-            elif line.startswith('SECTORS='):
-                bios_sectors = int(float(line.split('=', 1)[1].strip()))
-        self._log(f'BIOS Boot Partition: LBA={bios_lba}, offset={bios_offset}, sectors={bios_sectors}')
-
-        self._log('Step 5c: Patching boot.img and writing to MBR...')
-        boot_img_path = os.path.join(BOOT_SRC, 'boot.img')
-        if os.path.isfile(boot_img_path):
-            import struct
-            with open(boot_img_path, 'rb') as f:
-                boot_img_data = bytearray(f.read())
-            struct.pack_into('<I', boot_img_data, 0x1AC, bios_lba)
-            struct.pack_into('<I', boot_img_data, 0x1B0, 0)
-            struct.pack_into('<I', boot_img_data, 0x1B8, bios_sectors)
-            current_mbr = _read_raw_disk(disk, 512, byte_offset=0)
-            merged = bytes(boot_img_data[:446]) + current_mbr[446:512]
-            _write_raw_disk(disk, merged, byte_offset=0)
-            self._log(f'boot.img patched with core LBA={bios_lba} and written to MBR')
-        else:
-            self._log(f'Warning: boot.img not found at {boot_img_path}')
-
-        self._log('Step 5d: Writing core.img to BIOS Boot Partition...')
-        core_xz_path = os.path.join(BOOT_SRC, 'core.img.xz')
-        if os.path.isfile(core_xz_path) and bios_offset:
-            with lzma.open(core_xz_path, 'rb') as f:
-                core_data = f.read()
-            # Pad to 512-byte sector boundary (required for physical disk writes)
-            pad = (512 - len(core_data) % 512) % 512
-            if pad:
-                core_data += b'\x00' * pad
-            _write_raw_disk(disk, core_data, byte_offset=bios_offset)
-            self._log(f'core.img written to BIOS Boot Partition at LBA={bios_lba} ({len(core_data)} bytes, {len(core_data)//512} sectors)')
-        else:
-            if not os.path.isfile(core_xz_path):
-                self._log(f'Warning: core.img.xz not found at {core_xz_path}')
-            if not bios_offset:
-                self._log('Warning: could not determine BIOS Boot Partition offset')
-
-        self._log('Step 5e: Formatting and mounting ESP...')
+        self._log('Step 5: Formatting and mounting ESP...')
         esp_mount = os.path.join(tempfile.gettempdir(), 'kp_esp')
         os.makedirs(esp_mount, exist_ok=True)
         ps_format = f'''
 $part = Get-Partition -DiskNumber {disk} | Where-Object {{ $_.Type -eq "EFI" -or $_.GptType -eq "{{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}}" }} | Select-Object -First 1
-if (-not $part) {{ $part = Get-Partition -DiskNumber {disk} | Sort-Object PartitionNumber | Select-Object -Skip 1 -First 1 }}
 Set-Partition -DiskNumber {disk} -PartitionNumber $part.PartitionNumber -NoDefaultDriveLetter $true -ErrorAction SilentlyContinue
-        $part | Format-Volume -FileSystem FAT32 -NewFileSystemLabel "KOUPREYEFI" -Confirm:$false -ErrorAction Stop
+$part | Format-Volume -FileSystem FAT32 -NewFileSystemLabel "KPEFI" -Confirm:$false -ErrorAction Stop
 Add-PartitionAccessPath -DiskNumber {disk} -PartitionNumber $part.PartitionNumber -AccessPath "{esp_mount}" -ErrorAction Stop
 Write-Output "ESP={esp_mount}"
 '''
@@ -477,7 +343,7 @@ Write-Output "ESP={esp_mount}"
         self._log('ISO menu generated')
 
         self._log('Step 8: Copying grub.cfg to ESP...')
-        src_cfg = os.path.join(_base, 'assets', 'grub', 'grub', 'grub.cfg')
+        src_cfg = os.path.join(_base, 'assets', 'boot', 'grub', 'grub.cfg')
         cfg_main = os.path.join(esp_drive, 'grub', 'grub.cfg')
         cfg_fallback = os.path.join(esp_drive, 'EFI', 'BOOT', 'grub.cfg')
         shutil.copy2(src_cfg, cfg_main)
@@ -555,61 +421,6 @@ Write-Output "PART=$($part.PartitionNumber)"
             self._log(f'GRUB directory copied')
 
 
-        self._log(f'Copying boot.img and core.img.xz to ESP root...')
-        boot_img_src = os.path.join(BOOT_SRC, 'boot.img')
-        if os.path.isfile(boot_img_src):
-            shutil.copy2(boot_img_src, os.path.join(esp_drive, 'boot.img'))
-            self._log('boot.img copied to ESP root')
-        else:
-            self._log('Warning: boot.img not found')
-        core_xz_src = os.path.join(BOOT_SRC, 'core.img.xz')
-        if os.path.isfile(core_xz_src):
-            shutil.copy2(core_xz_src, os.path.join(esp_drive, 'core.img.xz'))
-            self._log('core.img.xz copied to ESP root')
-        else:
-            self._log('Warning: core.img.xz not found')
-
-        self._log(f'Copying all Ventoy OS requirement files to ESP...')
-        ventoy_src = os.path.join(src, 'ventoy')
-        dest_ventoy = os.path.join(esp_drive, 'ventoy')
-        if os.path.isdir(ventoy_src):
-            os.makedirs(dest_ventoy, exist_ok=True)
-            shutil.copytree(ventoy_src, dest_ventoy, dirs_exist_ok=True)
-            self._log(f'Ventoy files copied to {dest_ventoy}')
-        else:
-            self._log('Warning: ventoy source not found')
-
-        self._log(f'Copying wimboot to ESP root...')
-        wimboot_src = os.path.join(src, 'ventoy', 'wimboot.x86_64.xz')
-        if os.path.isfile(wimboot_src):
-            shutil.copy2(wimboot_src, os.path.join(esp_drive, 'wimboot'))
-            self._log('wimboot copied to ESP root')
-        else:
-            self._log('Warning: wimboot.x86_64.xz not found in ventoy/')
-
-        self._log(f'Copying memdisk to grub/ for $prefix/memdisk...')
-        memdisk_src = os.path.join(src, 'ventoy', 'memdisk')
-        if os.path.isfile(memdisk_src):
-            shutil.copy2(memdisk_src, os.path.join(dest_grub, 'memdisk'))
-            self._log('memdisk copied to grub/')
-        else:
-            self._log('Warning: memdisk not found in ventoy/')
-
-        self._log(f'Copying ipxe.krn for Windows BIOS boot...')
-        ipxe_src = os.path.join(src, 'ventoy', 'ipxe.krn')
-        if os.path.isfile(ipxe_src):
-            shutil.copy2(ipxe_src, os.path.join(esp_drive, 'ipxe.krn'))
-            self._log('ipxe.krn copied to ESP root')
-        else:
-            self._log('Warning: ipxe.krn not found in ventoy/')
-
-        self._log(f'Copying Ventoy EFI drivers...')
-        for driver in ['iso9660_x64.efi', 'udf_x64.efi', 'iso9660_ia32.efi', 'udf_ia32.efi']:
-            drv_src = os.path.join(src, 'ventoy', driver)
-            if os.path.isfile(drv_src):
-                shutil.copy2(drv_src, os.path.join(dest_efi, driver))
-        self._log('Ventoy EFI drivers copied')
-
         self._log(f'Copying default theme (Vimix)...')
         theme_src = os.path.join(_base, 'themes', 'Vimix-theme', 'themes')
         if os.path.isdir(theme_src):
@@ -639,33 +450,35 @@ Write-Output "PART=$($part.PartitionNumber)"
         lower = fname.lower()
         if any(k in lower for k in ('winpe', 'win11', 'win10', 'win8', 'win7',
                                     'windows', 'winxp', 'win2008', 'win2012',
-                                    'win2016', 'win2019', 'win2022', 'server',
-                                    'windows11', 'windows10', 'windows8',
+                                    'win2016', 'win2019', 'win2022', 'win2025',
+                                    'server', 'windows11', 'windows10', 'windows8',
                                     'windows7', 'longhorn', 'vista', 'dlc')):
             return 'windows'
-        if any(k in lower for k in ('arch', 'cachyos', 'endeavouros', 'manjaro',
+        if any(k in lower for k in ('manjaro',)):
+            return 'manjaro'
+        if any(k in lower for k in ('arch', 'cachyos', 'endeavouros',
                                     'arcolinux', 'garuda', 'artix', 'archbang',
                                     'archlabs', 'rebornos', 'anarchy', 'blackarch',
-                                    'parabola', 'hyperbola')):
+                                    'parabola', 'hyperbola', 'archman')):
             return 'arch'
-        if any(k in lower for k in ('redorescue', 'systemrescue', 'systemrescuecd',
-                                    'rescatux')):
-            return 'live'
         if any(k in lower for k in ('ubuntu', 'linuxmint', 'pop', 'zorin', 'kubuntu',
                                     'xubuntu', 'lubuntu', 'ubuntu-mate', 'ubuntu-budgie',
                                     'ubuntu-studio', 'edubuntu', 'mythbuntu', 'elementary',
                                     'neon', 'kde neon', 'peppermint', 'regolith',
-                                    'pop!_os')):
+                                    'pop!_os', 'bubuntu', 'rhino', 'vanilla')):
             return 'ubuntu'
         if any(k in lower for k in ('fedora', 'nobara', 'silverblue', 'kinetic',
                                     'sericea', 'serpentine', 'budgie', 'workstation',
-                                    'fedora-coreos', 'fedora-iot', 'fedora-labs')):
+                                    'fedora-coreos', 'fedora-iot', 'fedora-labs',
+                                    'fedora-spins', 'fedora-everything')):
             return 'fedora'
         if any(k in lower for k in ('debian', 'devuan', 'sparkylinux', 'mx', 'mxlinux',
                                     'antix', 'kali', 'parrot', 'tails', 'deepin',
-                                    'pureos', 'kanotix', 'siduction')):
+                                    'pureos', 'kanotix', 'siduction', 'lmde',
+                                    'debian-live', 'raspberry')):
             return 'debian'
-        if any(k in lower for k in ('opensuse', 'suse', 'sles', 'leap', 'tumbleweed')):
+        if any(k in lower for k in ('opensuse', 'suse', 'sles', 'leap', 'tumbleweed',
+                                    'microos')):
             return 'opensuse'
         if any(k in lower for k in ('void', 'voidlinux')):
             return 'void'
@@ -673,10 +486,13 @@ Write-Output "PART=$($part.PartitionNumber)"
             return 'gentoo'
         if any(k in lower for k in ('slax', 'porteus', 'wifislax')):
             return 'slax'
-        if any(k in lower for k in ('puppy', 'fossa', 'bionicpup', 'xenialpup')):
+        if any(k in lower for k in ('puppy', 'fossa', 'bionicpup', 'xenialpup',
+                                    'focalpup', 'tahrpup')):
             return 'puppy'
         if any(k in lower for k in ('clonezilla', 'gparted', 'partedmagic', 'pmagic',
-                                    'systemrescue')):
+                                    'systemrescue', 'systemrescuecd', 'rescatux',
+                                    'redorescue', 'redobackup', 'hiren', 'hdt',
+                                    'memtest', 'memtest86', 'testdisk')):
             return 'rescue'
         if any(k in lower for k in ('solus', 'soluslive')):
             return 'solus'
@@ -687,9 +503,10 @@ Write-Output "PART=$($part.PartitionNumber)"
         if any(k in lower for k in ('photon', 'photonos')):
             return 'photon'
         if any(k in lower for k in ('freebsd', 'ghostbsd', 'nomadbsd', 'furybsd',
-                                    'midnightbsd', 'hellosystem', 'trident')):
+                                    'midnightbsd', 'hellosystem', 'trident',
+                                    'freenas', 'truenas', 'pfsense', 'opnsense')):
             return 'freebsd'
-        if any(k in lower for k in ('proxmox', 'xcp-ng', 'xenserver')):
+        if any(k in lower for k in ('proxmox', 'xcp-ng', 'xenserver', 'xcp')):
             return 'proxmox'
         if any(k in lower for k in ('esxi', 'vmware', 'vsphere')):
             return 'esxi'
@@ -700,69 +517,502 @@ Write-Output "PART=$($part.PartitionNumber)"
                                     'yosemite', 'mavericks', 'mountain lion',
                                     'lion', 'snow leopard', 'leopard')):
             return 'macos'
+        if any(k in lower for k in ('rocky', 'rockylinux', 'almalinux', 'alma',
+                                    'rhel', 'redhat', 'oraclelinux', 'oracle',
+                                    'centos', 'fedepel', 'springdal')):
+            return 'rhel'
+        if any(k in lower for k in ('slackware', 'slacko', 'salix', 'zenwalk',
+                                    'vectorlinux')):
+            return 'slackware'
+        if any(k in lower for k in ('mageia', 'mandriva', 'mandrake', 'rosa')):
+            return 'mageia'
+        if any(k in lower for k in ('netbsd', 'openbsd', 'dragonfly')):
+            return 'bsd'
+        if any(k in lower for k in ('tails', 'whonix', 'qubes', 'subgraph')):
+            return 'security'
+        if any(k in lower for k in ('android', 'androidx86', 'phoenixos', 'blissos',
+                                    'primeos')):
+            return 'android'
         return 'generic'
 
     @staticmethod
     def _make_entry(fname: str, safe_name: str, itype: str) -> str:
         iso_path = f'/ISOS/{safe_name}'
+        h = (
+            f'menuentry "Boot {safe_name}" --class {itype} {{\n'
+            f'    set iso_file="{iso_path}"\n'
+            f'    search --set=iso_partition --no-floppy --file $iso_file\n'
+            f'    if [ -z "$iso_partition" ]; then\n'
+            f'        set iso_partition=$data_root\n'
+            f'    fi\n'
+            f'    probe --set=iso_partition_uuid --fs-uuid $iso_partition\n'
+            f'    loopback loop ($iso_partition)$iso_file\n'
+        )
         if itype == 'windows':
             return (
-                f'menuentry "Boot {safe_name}" --class windows {{\n'
-                f'    insmod loopback\n'
-                f'    insmod iso9660\n'
-                f'    insmod udf\n'
+                f'{h}'
                 f'    insmod chain\n'
-                f'    set isofile="{iso_path}"\n'
-                f'    loopback loop ($data_root)$isofile\n'
                 f'    if [ -f (loop)/efi/boot/bootx64.efi ]; then\n'
-                f'        if chainloader (loop)/efi/boot/bootx64.efi; then\n'
-                f'            boot\n'
-                f'        fi\n'
+                f'        if chainloader (loop)/efi/boot/bootx64.efi; then boot; fi\n'
                 f'    elif [ -f (loop)/EFI/BOOT/BOOTX64.EFI ]; then\n'
-                f'        if chainloader (loop)/EFI/BOOT/BOOTX64.EFI; then\n'
-                f'            boot\n'
-                f'        fi\n'
+                f'        if chainloader (loop)/EFI/BOOT/BOOTX64.EFI; then boot; fi\n'
                 f'    elif [ -f (loop)/efi/microsoft/boot/bootmgfw.efi ]; then\n'
-                f'        if chainloader (loop)/efi/microsoft/boot/bootmgfw.efi; then\n'
-                f'            boot\n'
-                f'        fi\n'
+                f'        if chainloader (loop)/efi/microsoft/boot/bootmgfw.efi; then boot; fi\n'
+                f'    elif [ -f (loop)/sources/boot.wim ]; then\n'
+                f'        echo "Windows WIM-based ISO detected, using boot_iso fallback"\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
                 f'    else\n'
-                f'        boot_iso "($data_root)" "$isofile"\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
                 f'    fi\n'
                 f'}}'
             )
         if itype == 'macos':
             return (
-                f'menuentry "Boot {safe_name}" --class macos {{\n'
-                f'    insmod loopback\n'
-                f'    insmod iso9660\n'
-                f'    insmod udf\n'
+                f'{h}'
                 f'    insmod chain\n'
                 f'    insmod hfsplus\n'
-                f'    set isofile="{iso_path}"\n'
-                f'    loopback loop ($data_root)$isofile\n'
                 f'    if [ -f (loop)/System/Library/CoreServices/boot.efi ]; then\n'
-                f'        chainloader (loop)/System/Library/CoreServices/boot.efi\n'
-                f'        boot\n'
+                f'        chainloader (loop)/System/Library/CoreServices/boot.efi; boot\n'
                 f'    elif [ -f (loop)/usr/standalone/i386/boot.efi ]; then\n'
-                f'        chainloader (loop)/usr/standalone/i386/boot.efi\n'
-                f'        boot\n'
+                f'        chainloader (loop)/usr/standalone/i386/boot.efi; boot\n'
                 f'    elif [ -f (loop)/efi/boot/bootx64.efi ]; then\n'
-                f'        if chainloader (loop)/efi/boot/bootx64.efi; then\n'
-                f'            boot\n'
-                f'        fi\n'
+                f'        if chainloader (loop)/efi/boot/bootx64.efi; then boot; fi\n'
                 f'    elif [ -f (loop)/EFI/BOOT/BOOTX64.EFI ]; then\n'
-                f'        if chainloader (loop)/EFI/BOOT/BOOTX64.EFI; then\n'
-                f'            boot\n'
-                f'        fi\n'
+                f'        if chainloader (loop)/EFI/BOOT/BOOTX64.EFI; then boot; fi\n'
                 f'    else\n'
-                f'        boot_iso "($data_root)" "$isofile"\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'manjaro':
+            return (
+                f'{h}'
+                f'    set img_dev="/dev/disk/by-uuid/$iso_partition_uuid"\n'
+                f'    if [ -f (loop)/boot/vmlinuz-x86_64 ] && [ -f (loop)/boot/initramfs-x86_64.img ]; then\n'
+                f'        linux (loop)/boot/vmlinuz-x86_64 img_dev=$img_dev img_loop=$iso_file\n'
+                f'        initrd (loop)/boot/intel_ucode.img (loop)/boot/amd_ucode.img (loop)/boot/initramfs-x86_64.img\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/boot/vmlinuz-5.15-x86_64 ] && [ -f (loop)/boot/initramfs-5.15-x86_64.img ]; then\n'
+                f'        linux (loop)/boot/vmlinuz-5.15-x86_64 img_dev=$img_dev img_loop=$iso_file\n'
+                f'        initrd (loop)/boot/intel_ucode.img (loop)/boot/amd_ucode.img (loop)/boot/initramfs-5.15-x86_64.img\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/boot/vmlinuz-6.1-x86_64 ] && [ -f (loop)/boot/initramfs-6.1-x86_64.img ]; then\n'
+                f'        linux (loop)/boot/vmlinuz-6.1-x86_64 img_dev=$img_dev img_loop=$iso_file\n'
+                f'        initrd (loop)/boot/intel_ucode.img (loop)/boot/amd_ucode.img (loop)/boot/initramfs-6.1-x86_64.img\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'arch':
+            return (
+                f'{h}'
+                f'    set img_dev="UUID=$iso_partition_uuid"\n'
+                f'    if [ -f (loop)/arch/boot/x86_64/vmlinuz-linux ] && [ -f (loop)/arch/boot/x86_64/initramfs-linux.img ]; then\n'
+                f'        linux (loop)/arch/boot/x86_64/vmlinuz-linux img_dev=$img_dev img_loop=$iso_file archisobasedir=arch\n'
+                f'        initrd (loop)/arch/boot/intel-ucode.img (loop)/arch/boot/amd-ucode.img (loop)/arch/boot/x86_64/initramfs-linux.img\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/arch/boot/x86_64/vmlinuz-linux-lts ] && [ -f (loop)/arch/boot/x86_64/initramfs-linux-lts.img ]; then\n'
+                f'        linux (loop)/arch/boot/x86_64/vmlinuz-linux-lts img_dev=$img_dev img_loop=$iso_file archisobasedir=arch\n'
+                f'        initrd (loop)/arch/boot/x86_64/initramfs-linux-lts.img\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/arch/boot/x86_64/vmlinuz-linux-zen ] && [ -f (loop)/arch/boot/x86_64/initramfs-linux-zen.img ]; then\n'
+                f'        linux (loop)/arch/boot/x86_64/vmlinuz-linux-zen img_dev=$img_dev img_loop=$iso_file archisobasedir=arch\n'
+                f'        initrd (loop)/arch/boot/x86_64/initramfs-linux-zen.img\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/arch/boot/x86_64/vmlinuz-linux-hardened ] && [ -f (loop)/arch/boot/x86_64/initramfs-linux-hardened.img ]; then\n'
+                f'        linux (loop)/arch/boot/x86_64/vmlinuz-linux-hardened img_dev=$img_dev img_loop=$iso_file archisobasedir=arch\n'
+                f'        initrd (loop)/arch/boot/x86_64/initramfs-linux-hardened.img\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/boot/vmlinuz-x86_64 ] && [ -f (loop)/boot/initramfs-x86_64.img ]; then\n'
+                f'        linux (loop)/boot/vmlinuz-x86_64 img_dev=$img_dev img_loop=$iso_file\n'
+                f'        initrd (loop)/boot/initramfs-x86_64.img\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'ubuntu':
+            return (
+                f'{h}'
+                f'    set gfxpayload=keep\n'
+                f'    if [ -f (loop)/casper/vmlinuz ]; then\n'
+                f'        linux (loop)/casper/vmlinuz iso-scan/filename=$iso_file boot=casper quiet splash ---\n'
+                f'        if [ -f (loop)/casper/initrd ]; then\n'
+                f'            initrd (loop)/casper/initrd\n'
+                f'        elif [ -f (loop)/casper/initrd.img ]; then\n'
+                f'            initrd (loop)/casper/initrd.img\n'
+                f'        fi\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/casper/vmlinuz.efi ]; then\n'
+                f'        linux (loop)/casper/vmlinuz.efi iso-scan/filename=$iso_file boot=casper quiet splash ---\n'
+                f'        if [ -f (loop)/casper/initrd ]; then\n'
+                f'            initrd (loop)/casper/initrd\n'
+                f'        elif [ -f (loop)/casper/initrd.lz ]; then\n'
+                f'            initrd (loop)/casper/initrd.lz\n'
+                f'        fi\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/live/vmlinuz ] && [ -f (loop)/live/initrd.img ]; then\n'
+                f'        linux (loop)/live/vmlinuz boot=live findiso=$iso_file components splash\n'
+                f'        initrd (loop)/live/initrd.img\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'debian':
+            return (
+                f'{h}'
+                f'    if [ -f (loop)/live/vmlinuz ] && [ -f (loop)/live/initrd.img ]; then\n'
+                f'        linux (loop)/live/vmlinuz boot=live buuid=$iso_partition_uuid findiso=$iso_file components\n'
+                f'        initrd (loop)/live/initrd.img\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/install.amd/vmlinuz ] && [ -f (loop)/install.amd/initrd.gz ]; then\n'
+                f'        linux (loop)/install.amd/vmlinuz boot=live buuid=$iso_partition_uuid findiso=$iso_file vga=788\n'
+                f'        initrd (loop)/install.amd/initrd.gz\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/install.amd/vmlinuz ] && [ -f (loop)/install.amd/gtk/initrd.gz ]; then\n'
+                f'        linux (loop)/install.amd/vmlinuz boot=live buuid=$iso_partition_uuid findiso=$iso_file vga=788\n'
+                f'        initrd (loop)/install.amd/gtk/initrd.gz\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'fedora':
+            return (
+                f'{h}'
+                f'    probe --set=isolabel --label (loop)\n'
+                f'    if [ -f (loop)/images/pxeboot/vmlinuz ] && [ -f (loop)/images/pxeboot/initrd.img ]; then\n'
+                f'        linux (loop)/images/pxeboot/vmlinuz root=live:CDLABEL=$isolabel rd.live.image iso-scan/filename=$iso_file quiet rhgb\n'
+                f'        initrd (loop)/images/pxeboot/initrd.img\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/isolinux/vmlinuz ] && [ -f (loop)/isolinux/initrd.img ]; then\n'
+                f'        linux (loop)/isolinux/vmlinuz root=live:CDLABEL=$isolabel rd.live.image iso-scan/filename=$iso_file quiet rhgb\n'
+                f'        initrd (loop)/isolinux/initrd.img\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/LiveOS/squashfs.img ]; then\n'
+                f'        linux (loop)/isolinux/vmlinuz root=live:CDLABEL=$isolabel rd.live.image quiet rhgb\n'
+                f'        initrd (loop)/isolinux/initrd.img\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'rhel':
+            return (
+                f'{h}'
+                f'    if [ -f (loop)/images/pxeboot/vmlinuz ] && [ -f (loop)/images/pxeboot/initrd.img ]; then\n'
+                f'        linux (loop)/images/pxeboot/vmlinuz repo=hd:UUID=$iso_partition_uuid:/ quiet rhgb\n'
+                f'        initrd (loop)/images/pxeboot/initrd.img\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/isolinux/vmlinuz ] && [ -f (loop)/isolinux/initrd.img ]; then\n'
+                f'        linux (loop)/isolinux/vmlinuz repo=hd:UUID=$iso_partition_uuid:/ quiet rhgb\n'
+                f'        initrd (loop)/isolinux/initrd.img\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        probe --set=isolabel --label (loop)\n'
+                f'        if [ -f (loop)/images/pxeboot/vmlinuz ] && [ -f (loop)/images/pxeboot/initrd.img ]; then\n'
+                f'            linux (loop)/images/pxeboot/vmlinuz root=live:CDLABEL=$isolabel rd.live.image quiet rhgb\n'
+                f'            initrd (loop)/images/pxeboot/initrd.img\n'
+                f'            boot\n'
+                f'        elif [ -f (loop)/isolinux/vmlinuz ] && [ -f (loop)/isolinux/initrd.img ]; then\n'
+                f'            linux (loop)/isolinux/vmlinuz root=live:CDLABEL=$isolabel rd.live.image quiet rhgb\n'
+                f'            initrd (loop)/isolinux/initrd.img\n'
+                f'            boot\n'
+                f'        else\n'
+                f'            boot_iso "($iso_partition)" "$iso_file"\n'
+                f'        fi\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'opensuse':
+            return (
+                f'{h}'
+                f'    if [ -f (loop)/boot/x86_64/loader/linux ] && [ -f (loop)/boot/x86_64/loader/initrd ]; then\n'
+                f'        linux (loop)/boot/x86_64/loader/linux splash=silent quiet isofrom_device=$iso_partition isofrom_system=$iso_file\n'
+                f'        initrd (loop)/boot/x86_64/loader/initrd\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/boot/x86_64/loader/linux ] && [ -f (loop)/boot/x86_64/loader/initrd.gz ]; then\n'
+                f'        linux (loop)/boot/x86_64/loader/linux splash=silent quiet isofrom_device=$iso_partition isofrom_system=$iso_file\n'
+                f'        initrd (loop)/boot/x86_64/loader/initrd.gz\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'void':
+            return (
+                f'{h}'
+                f'    if [ -f (loop)/boot/vmlinuz ] && [ -f (loop)/boot/initrd ]; then\n'
+                f'        linux (loop)/boot/vmlinuz img_dev=$iso_partition img_loop=$iso_file\n'
+                f'        initrd (loop)/boot/initrd\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'gentoo':
+            return (
+                f'{h}'
+                f'    if [ -f (loop)/boot/gentoo ] && [ -f (loop)/boot/gentoo.igz ]; then\n'
+                f'        linux (loop)/boot/gentoo dokeymap looptype=squashfs loop=/image.squashfs cdroot=/dev/loop0\n'
+                f'        initrd (loop)/boot/gentoo.igz\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/isolinux/gentoo ] && [ -f (loop)/isolinux/gentoo.igz ]; then\n'
+                f'        linux (loop)/isolinux/gentoo dokeymap looptype=squashfs loop=/image.squashfs cdroot=/dev/loop0\n'
+                f'        initrd (loop)/isolinux/gentoo.igz\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/boot/vmlinuz ] && [ -f (loop)/boot/initrd.img ]; then\n'
+                f'        linux (loop)/boot/vmlinuz cdroot\n'
+                f'        initrd (loop)/boot/initrd.img\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'rescue':
+            return (
+                f'{h}'
+                f'    if [ -f (loop)/live/vmlinuz ] && [ -f (loop)/live/initrd.img ]; then\n'
+                f'        linux (loop)/live/vmlinuz boot=live findiso=$iso_file components\n'
+                f'        initrd (loop)/live/initrd.img\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/sysresccd/boot/x86_64/vmlinuz ] && [ -f (loop)/sysresccd/boot/x86_64/sysresccd.img ]; then\n'
+                f'        linux (loop)/sysresccd/boot/x86_64/vmlinuz archisobasedir=sysresccd archisolabel=SYSRESCUECD\n'
+                f'        initrd (loop)/sysresccd/boot/x86_64/sysresccd.img\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/pmagic/bzImage ] && [ -f (loop)/pmagic/initrd.img ]; then\n'
+                f'        linux (loop)/pmagic/bzImage edd=off noapic\n'
+                f'        initrd (loop)/pmagic/initrd.img\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/clonezilla/live/vmlinuz ] && [ -f (loop)/clonezilla/live/initrd.img ]; then\n'
+                f'        linux (loop)/clonezilla/live/vmlinuz boot=live findiso=$iso_file components\n'
+                f'        initrd (loop)/clonezilla/live/initrd.img\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'slax':
+            return (
+                f'{h}'
+                f'    if [ -f (loop)/slax/boot/vmlinuz ] && [ -f (loop)/slax/boot/initrfs.img ]; then\n'
+                f'        linux (loop)/slax/boot/vmlinuz from=$iso_file slax_dir=/slax load_ramdisk=1 prompt_ramdisk=0\n'
+                f'        initrd (loop)/slax/boot/initrfs.img\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/boot/vmlinuz ] && [ -f (loop)/boot/initrfs.img ]; then\n'
+                f'        linux (loop)/boot/vmlinuz from=$iso_file load_ramdisk=1 prompt_ramdisk=0\n'
+                f'        initrd (loop)/boot/initrfs.img\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/porteus/boot/vmlinuz ] && [ -f (loop)/porteus/boot/initrd.xz ]; then\n'
+                f'        linux (loop)/porteus/boot/vmlinuz from=$iso_file\n'
+                f'        initrd (loop)/porteus/boot/initrd.xz\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'puppy':
+            return (
+                f'{h}'
+                f'    if [ -f (loop)/vmlinuz ] && [ -f (loop)/initrd.gz ]; then\n'
+                f'        linux (loop)/vmlinuz pmedia=cd\n'
+                f'        initrd (loop)/initrd.gz\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/vmlinuz ] && [ -f (loop)/initrd.img ]; then\n'
+                f'        linux (loop)/vmlinuz pmedia=cd\n'
+                f'        initrd (loop)/initrd.img\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'solus':
+            return (
+                f'{h}'
+                f'    if [ -f (loop)/boot/vmlinuz ] && [ -f (loop)/boot/initrd.img ]; then\n'
+                f'        linux (loop)/boot/vmlinuz iso-scan/filename=$iso_file boot=live quiet splash\n'
+                f'        initrd (loop)/boot/initrd.img\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'nixos':
+            return (
+                f'{h}'
+                f'    if [ -f (loop)/boot/vmlinuz ] && [ -f (loop)/boot/initrd ]; then\n'
+                f'        linux (loop)/boot/vmlinuz findiso=$iso_file\n'
+                f'        initrd (loop)/boot/initrd\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'alpine':
+            return (
+                f'{h}'
+                f'    if [ -f (loop)/boot/vmlinuz-lts ] && [ -f (loop)/boot/initramfs-lts ]; then\n'
+                f'        linux (loop)/boot/vmlinuz-lts alpine_dev=$iso_partition:$iso_file modloop=$iso_partition:$iso_file modules=loop,squashfs quiet\n'
+                f'        initrd (loop)/boot/initramfs-lts\n'
+                f'        boot\n'
+                f'    elif [ -f (loop)/boot/vmlinuz-virt ] && [ -f (loop)/boot/initramfs-virt ]; then\n'
+                f'        linux (loop)/boot/vmlinuz-virt alpine_dev=$iso_partition:$iso_file modloop=$iso_partition:$iso_file modules=loop,squashfs quiet\n'
+                f'        initrd (loop)/boot/initramfs-virt\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'photon':
+            return (
+                f'{h}'
+                f'    if [ -f (loop)/isolinux/vmlinuz ] && [ -f (loop)/isolinux/initrd.img ]; then\n'
+                f'        linux (loop)/isolinux/vmlinuz root=/dev/cdrom\n'
+                f'        initrd (loop)/isolinux/initrd.img\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'freebsd':
+            return (
+                f'{h}'
+                f'    insmod chain\n'
+                f'    insmod hfsplus\n'
+                f'    if [ -f (loop)/efi/boot/bootx64.efi ]; then\n'
+                f'        if chainloader (loop)/efi/boot/bootx64.efi; then boot; fi\n'
+                f'    elif [ -f (loop)/EFI/BOOT/BOOTX64.EFI ]; then\n'
+                f'        if chainloader (loop)/EFI/BOOT/BOOTX64.EFI; then boot; fi\n'
+                f'    elif [ -f (loop)/boot/kernel/kernel ]; then\n'
+                f'        kfreebsd (loop)/boot/kernel/kernel\n'
+                f'        if [ -f (loop)/boot/device.hints ]; then\n'
+                f'            kfreebsd_loadenv (loop)/boot/device.hints\n'
+                f'        fi\n'
+                f'        set kFreeBSD.vfs.root.mountfrom=cd9660:/dev/iso9660/ISO\n'
+                f'        kfreebsd_module (loop)/boot/kernel/geom_uzip.ko\n'
+                f'        if [ -f (loop)/boot/kernel/initrd ]; then\n'
+                f'            kfreebsd_module (loop)/boot/kernel/initrd type=rootfs\n'
+                f'        fi\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'bsd':
+            return (
+                f'{h}'
+                f'    insmod chain\n'
+                f'    if [ -f (loop)/efi/boot/bootx64.efi ]; then\n'
+                f'        if chainloader (loop)/efi/boot/bootx64.efi; then boot; fi\n'
+                f'    elif [ -f (loop)/EFI/BOOT/BOOTX64.EFI ]; then\n'
+                f'        if chainloader (loop)/EFI/BOOT/BOOTX64.EFI; then boot; fi\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'proxmox':
+            return (
+                f'{h}'
+                f'    if [ -f (loop)/boot/linux26 ] && [ -f (loop)/boot/initrd.img ]; then\n'
+                f'        linux (loop)/boot/linux26\n'
+                f'        initrd (loop)/boot/initrd.img\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'esxi':
+            return (
+                f'{h}'
+                f'    if [ -f (loop)/efi/boot/bootx64.efi ]; then\n'
+                f'        if chainloader (loop)/efi/boot/bootx64.efi; then boot; fi\n'
+                f'    elif [ -f (loop)/EFI/BOOT/BOOTX64.EFI ]; then\n'
+                f'        if chainloader (loop)/EFI/BOOT/BOOTX64.EFI; then boot; fi\n'
+                f'    elif [ -f (loop)/isolinux/vmlinuz ] && [ -f (loop)/isolinux/initrd.img ]; then\n'
+                f'        linux (loop)/isolinux/vmlinuz\n'
+                f'        initrd (loop)/isolinux/initrd.img\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'slackware':
+            return (
+                f'{h}'
+                f'    if [ -f (loop)/boot/vmlinuz ] && [ -f (loop)/boot/initrd.img ]; then\n'
+                f'        linux (loop)/boot/vmlinuz load_ramdisk=1 prompt_ramdisk=0 rw SLACK_KERNEL=vmlinuz\n'
+                f'        initrd (loop)/boot/initrd.img\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'mageia':
+            return (
+                f'{h}'
+                f'    if [ -f (loop)/boot/vmlinuz ] && [ -f (loop)/boot/initrd.img ]; then\n'
+                f'        linux (loop)/boot/vmlinuz iso-scan/filename=$iso_file\n'
+                f'        initrd (loop)/boot/initrd.img\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'security':
+            return (
+                f'{h}'
+                f'    if [ -f (loop)/live/vmlinuz ] && [ -f (loop)/live/initrd.img ]; then\n'
+                f'        linux (loop)/live/vmlinuz boot=live findiso=$iso_file components\n'
+                f'        initrd (loop)/live/initrd.img\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
+                f'    fi\n'
+                f'}}'
+            )
+        if itype == 'android':
+            return (
+                f'{h}'
+                f'    insmod chain\n'
+                f'    if [ -f (loop)/efi/boot/bootx64.efi ]; then\n'
+                f'        if chainloader (loop)/efi/boot/bootx64.efi; then boot; fi\n'
+                f'    elif [ -f (loop)/EFI/BOOT/BOOTX64.EFI ]; then\n'
+                f'        if chainloader (loop)/EFI/BOOT/BOOTX64.EFI; then boot; fi\n'
+                f'    elif [ -f (loop)/kernel ] && [ -f (loop)/initrd.img ]; then\n'
+                f'        linux (loop)/kernel root=/dev/ram0 androidboot.hardware=android_x86\n'
+                f'        initrd (loop)/initrd.img\n'
+                f'        boot\n'
+                f'    else\n'
+                f'        boot_iso "($iso_partition)" "$iso_file"\n'
                 f'    fi\n'
                 f'}}'
             )
         return (
-            f'menuentry "Boot {safe_name}" --class {itype} {{\n'
-            f'    boot_iso "($data_root)" "{iso_path}"\n'
+            f'{h}'
+            f'    boot_iso "($iso_partition)" "$iso_file"\n'
             f'}}'
         )
 
@@ -778,6 +1028,7 @@ Write-Output "PART=$($part.PartitionNumber)"
                 f.write('# Kouprey Boot ISO directory marker\n')
 
         entries = []
+        type_counts = {}
         for fname in sorted(os.listdir(iso_dir)):
             if fname == '.iso_menu.cfg':
                 continue
@@ -787,24 +1038,30 @@ Write-Output "PART=$($part.PartitionNumber)"
             safe_name = fname.replace('"', '\\"')
             itype = KoupreyFlashWorker._detect_iso_type(fname)
             entries.append(KoupreyFlashWorker._make_entry(fname, safe_name, itype))
+            type_counts[itype] = type_counts.get(itype, 0) + 1
+        type_summary = ', '.join(f'{k}={v}' for k, v in sorted(type_counts.items()))
         with open(menu_path, 'w', encoding='utf-8') as f:
             f.write('# Kouprey Boot ISO menu - auto-generated\n')
             f.write(f'# {len(entries)} ISO(s) found in /ISOS/\n')
+            f.write(f'# Types: {type_summary}\n')
             f.write('# Re-generate: python flash_headless.py -gen-iso-menu -disk N\n')
             f.write('#\n')
-            f.write('# ISO boot strategy (Ventoy-inspired):\n')
-            f.write('#  1. Specific entries (above) use hardcoded kernel/initrd paths\n')
-            f.write('#     for known distro families (Windows, Arch, Ubuntu, Fedora, etc.)\n')
+            f.write('# ISO boot strategy:\n')
+            f.write('#  1. Specific entries for known distro families use hardcoded\n')
+            f.write('#     kernel/initrd paths for reliable booting:\n')
+            f.write('#     windows, macos, manjaro, arch, ubuntu, debian, fedora,\n')
+            f.write('#     rhel, opensuse, void, gentoo, rescue, slax, puppy, solus,\n')
+            f.write('#     nixos, alpine, photon, freebsd, proxmox, esxi, slackware,\n')
+            f.write('#     mageia, security (tails/qubes), android\n')
             f.write('#  2. Generic entries delegate to boot_iso() which tries:\n')
-            f.write('#     a) loopback.cfg from inside the ISO (most modern distros)\n')
-            f.write('#     b) grub.cfg from inside the ISO\n')
-            f.write("#     c) UEFI: chainload ISO's own bootx64.efi\n")
-            f.write('#     d) Legacy BIOS: memdisk fallback\n')
-            f.write('#  3. Kernel/initrd/archiso.img are READ FROM INSIDE THE ISO via\n')
+            f.write('#     a) loopback.cfg / grub.cfg from inside the ISO (most distros)\n')
+            f.write("#     b) chainload ISO's own bootx64.efi (UEFI)\n")
+            f.write('#     c) memdisk fallback (Legacy BIOS)\n')
+            f.write('#  3. All kernels/initrds are READ FROM INSIDE THE ISO via\n')
             f.write('#     GRUB loopback mount - no separate download needed.\n')
             f.write('#\n')
-            f.write('# If a specific entry fails, delete or comment it out and the\n')
-            f.write('# generic boot_iso fallback will handle it instead.\n')
+            f.write('# If a specific entry fails, comment it out and the\n')
+            f.write('# generic boot_iso fallback will handle it automatically.\n')
             f.write('#\n')
             f.write('\n'.join(entries))
             f.write('\n')

@@ -122,7 +122,7 @@ def do_deploy(disk_number, theme_name):
         num = p.get('Number', 0)
         if label == 'KOUPREYDATA':
             data_mount = letter.rstrip('\\')
-        elif label == 'KOUPREYEFI':
+        elif label == 'KPEFI':
             esp_part_num = num
             if letter:
                 esp_mount = letter.rstrip('\\')

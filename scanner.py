@@ -147,8 +147,20 @@ def _detect_windows_drives() -> list[DriveInfo]:
                 } elseif (-not $mount) {
                     $mount = $mp
                 }
-            } elseif ($vol.FileSystemLabel -eq "KOUPREYESP") {
+            } elseif ($vol.FileSystemLabel -eq "KPEFI") {
                 $kouprey = $true
+            }
+            # Also check for mount points (folder-based mount)
+            if ($part.AccessPaths) {
+                foreach ($ap in $part.AccessPaths) {
+                    if ($ap -ne $part.PartitionNumber -and $ap -ne "\\\\.\\$($part.Guid)" -and $ap -match '^[A-Z]:\\' -and $ap -ne $mount) {
+                        $mp2 = $ap
+                        if ((Test-Path ($mp2 + "ISOS")) -or (Test-Path ($mp2 + "grub"))) {
+                            $kouprey = $true
+                            if (-not $dataMount) { $dataMount = $mp2 }
+                        }
+                    }
+                }
             }
         }
         $result += [PSCustomObject]@{
@@ -231,9 +243,16 @@ def _detect_linux_drives() -> list[DriveInfo]:
 
         has_kouprey = False
         for mp in mount_points:
-            if (os.path.isfile(os.path.join(mp, 'EFI', 'BOOT', 'BOOTX64.EFI')) or
-                os.path.isfile(os.path.join(mp, 'EFI', 'BOOT', 'grub.cfg')) or
-                os.path.isfile(os.path.join(mp, 'grub', 'x86_64-efi', 'normal.mod'))):
+            marker_dirs = [
+                os.path.join(mp, 'ISOS', 'DUMMY'),
+                os.path.join(mp, 'ISOS', '.iso_menu.cfg'),
+                os.path.join(mp, 'themes', '.marker'),
+            ]
+            marker_efi = (
+                os.path.isfile(os.path.join(mp, 'EFI', 'BOOT', 'BOOTX64.EFI')) and
+                os.path.isfile(os.path.join(mp, 'grub', 'x86_64-efi', 'normal.mod'))
+            )
+            if marker_efi or any(os.path.isfile(p) for p in marker_dirs):
                 has_kouprey = True
                 mount = mp
                 break

@@ -1,0 +1,20 @@
+# Disk DescriptorFile
+version=1
+CID=ffffffff
+parentCID=ffffffff
+createType="monolithicFlat"
+
+# Extent description
+RW 16777216 FLAT "kouprey_test.vhd" 0
+
+# The disk Data Base
+#DDB
+
+ddb.vendor = "VMware"
+ddb.toolsVersion = "0"
+ddb.encoding = "windows-1252"
+ddb.geometry.cylinders = "16644"
+ddb.geometry.heads = "16"
+ddb.geometry.sectors = "63"
+ddb.uuid = "60 00 C2 9A 78 A3 7A 4B-A5 2C 5A 71 82 9F 51 EF"
+ddb.longContentID = "ffffffffffffffffffffffffffffffff"
