@@ -422,6 +422,32 @@ QFrame#footer {{
     background: transparent;
     border-top: 2px solid {c.border};
 }}
+
+QTabWidget::pane {{
+    background: transparent;
+    border: none;
+}}
+
+QTabBar::tab {{
+    background: transparent;
+    color: {c.text_secondary};
+    padding: 8px 16px;
+    font-size: 11pt;
+    font-weight: 500;
+    border: none;
+    border-bottom: 2px solid transparent;
+    margin-right: 4px;
+}}
+
+QTabBar::tab:selected {{
+    color: {c.accent};
+    border-bottom: 2px solid {c.accent};
+}}
+
+QTabBar::tab:hover {{
+    color: {c.text_primary};
+    background: {c.nav_hover_bg};
+}}
 """
 
 

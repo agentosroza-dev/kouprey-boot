@@ -36,14 +36,18 @@ def main():
         _elevate()
         return
 
+    lang_dir = os.path.join(os.path.dirname(__file__), 'assets', 'lang')
+    lang = LanguageManager(lang_dir)
+    lang.switch_to('km')
+
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
 
     if sys_name not in ('Windows', 'Linux'):
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Icon.Critical)
-        msg.setWindowTitle('Unsupported OS')
-        msg.setText('This application supports Windows and Linux only.')
+        msg.setWindowTitle(lang.get('unsupported_os_title'))
+        msg.setText(lang.get('unsupported_os_msg'))
         msg.exec()
         return
 
@@ -63,10 +67,6 @@ def main():
         font = QFont('Leelawadee UI', 11)
     font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
     app.setFont(font)
-
-    lang_dir = os.path.join(os.path.dirname(__file__), 'assets', 'lang')
-    lang = LanguageManager(lang_dir)
-    lang.switch_to('km')
 
     theme_mgr = ThemeManager(app)
     theme_mgr.set_mode('light')

@@ -3,8 +3,8 @@ import os
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QMessageBox, QFrame, QApplication,
-    QStackedWidget, QComboBox, QProgressBar,
-    QScrollArea,
+    QStackedWidget, QComboBox, QProgressBar, QTabWidget,
+    QScrollArea, QFileDialog,
 )
 
 from PyQt6.QtCore import Qt, QTimer, QSize, pyqtSignal
@@ -16,7 +16,7 @@ from scanner import (
     list_usb_drives, list_available_themes,
     DriveInfo, ThemeInfo,
 )
-from worker import create_flash_worker, create_deploy_worker, rename_volume
+from worker import create_flash_worker, create_deploy_worker, create_iso_worker, rename_volume, is_windows_iso
 
 
 PAGES = [
@@ -27,33 +27,65 @@ PAGES = [
 
 
 class DriveCard(QFrame):
-    flash_requested = pyqtSignal(object)
-
     def __init__(self, drive: DriveInfo, lang, parent=None):
         super().__init__(parent)
         self.setObjectName('card')
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.drive = drive
         self._lang = lang
         self._build()
 
     def _build(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(12)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(0)
 
         top = QHBoxLayout()
         top.setSpacing(14)
 
-        icon_name = 'check-circle' if self.drive.has_ventoy else 'hard-drive'
-        icon_color = '#000000' if self.drive.has_ventoy else '#666666'
+        bt = self.drive.boot_type
+        if bt == 'ventoy':
+            icon_name, icon_color = 'check-circle', '#000000'
+            badge_prefix = '\u2714 '
+            badge_key = 'badge_ventoy'
+            badge_bg = '#E8E8E8'
+            badge_border = '#555555'
+            badge_fg = '#000000'
+        elif bt in ('windows',):
+            icon_name, icon_color = 'monitor', '#1A1A1A'
+            badge_prefix = '\u25a0 '
+            badge_key = 'badge_windows'
+            badge_bg = '#E8E8E8'
+            badge_border = '#555555'
+            badge_fg = '#000000'
+        elif bt in ('winpe',):
+            icon_name, icon_color = 'monitor', '#555555'
+            badge_prefix = '\u25a0 '
+            badge_key = 'badge_winpe'
+            badge_bg = '#E8E8E8'
+            badge_border = '#555555'
+            badge_fg = '#000000'
+        elif bt in ('ubuntu', 'mint', 'debian', 'fedora', 'manjaro', 'cachyos', 'arch', 'kali', 'pop', 'opensuse', 'gentoo', 'slackware', 'redhat', 'linux'):
+            icon_name, icon_color = 'terminal', '#333333'
+            badge_prefix = '\u25b6 '
+            badge_key = 'badge_' + bt
+            badge_bg = '#E8E8E8'
+            badge_border = '#555555'
+            badge_fg = '#000000'
+        else:
+            icon_name, icon_color = 'hard-drive', '#666666'
+            badge_prefix = '\u25cb '
+            badge_key = 'badge_no_os'
+            badge_bg = '#F0F0F0'
+            badge_border = '#B0B0B0'
+            badge_fg = '#555555'
+
         icon_lbl = QLabel()
-        icon_lbl.setFixedSize(32, 32)
-        icon_lbl.setPixmap(lucide_icon(icon_name, 32, icon_color).pixmap(32, 32))
+        icon_lbl.setFixedSize(36, 36)
+        icon_lbl.setPixmap(lucide_icon(icon_name, 36, icon_color).pixmap(36, 36))
         top.addWidget(icon_lbl)
 
         info = QVBoxLayout()
-        info.setSpacing(2)
+        info.setSpacing(0)
         name = QLabel(self.drive.model)
         name.setObjectName('statusLabel')
         f = name.font()
@@ -62,35 +94,24 @@ class DriveCard(QFrame):
         name.setFont(f)
         info.addWidget(name)
 
-        detail = QLabel(f'{self._lang.get("disk_label")} #{self.drive.number}  \u00b7  {self.drive.size_gb}')
+        detail = QLabel(f'{self.drive.size_gb}')
         detail.setObjectName('statusLabel')
         info.addWidget(detail)
 
-        if self.drive.device_path:
-            dp = QLabel(self.drive.device_path)
-            dp.setObjectName('statusLabel')
-            info.addWidget(dp)
         top.addLayout(info, 1)
 
         badge = QFrame()
-        if self.drive.has_ventoy:
-            badge.setStyleSheet(
-                'background: #E8E8E8; border: 1px solid #555555; '
-                'border-radius: 6px; padding: 3px 10px;'
-            )
-            badge_lbl = QLabel('\u2714 ' + self._lang.get('badge_ventoy'))
-            badge_lbl.setStyleSheet(
-                'font-size: 10pt; font-weight: 600; color: #000000; background: transparent;'
-            )
-        else:
-            badge.setStyleSheet(
-                'background: #F0F0F0; border: 1px solid #B0B0B0; '
-                'border-radius: 6px; padding: 3px 10px;'
-            )
-            badge_lbl = QLabel('\u25cb ' + self._lang.get('badge_no_ventoy'))
-            badge_lbl.setStyleSheet(
-                'font-size: 10pt; font-weight: 600; color: #555555; background: transparent;'
-            )
+        badge.setStyleSheet(
+            f'background: {badge_bg}; border: 1px solid {badge_border}; '
+            f'border-radius: 4px; padding: 2px 8px;'
+        )
+        label_text = self._lang.get(badge_key)
+        if self.drive.os_name and self.drive.os_name != label_text:
+            label_text = self.drive.os_name
+        badge_lbl = QLabel(label_text)
+        badge_lbl.setStyleSheet(
+            f'font-size: 9pt; font-weight: 600; color: {badge_fg}; background: transparent;'
+        )
         b_layout = QVBoxLayout(badge)
         b_layout.setContentsMargins(0, 0, 0, 0)
         b_layout.addWidget(badge_lbl)
@@ -104,26 +125,8 @@ class DriveCard(QFrame):
 
         layout.addLayout(top)
 
-        if self.drive.has_ventoy:
-            return
-
-        actions = QHBoxLayout()
-        actions.setSpacing(8)
-        actions.addStretch()
-
-        btn_flash = QPushButton(self._lang.get('flash_ventoy_btn'))
-        btn_flash.setObjectName('btn_accent')
-        btn_flash.setFixedHeight(34)
-        btn_flash.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_flash.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        btn_flash.clicked.connect(lambda: self.flash_requested.emit(self.drive))
-        actions.addWidget(btn_flash)
-        layout.addLayout(actions)
-
 
 class DashboardPage(QWidget):
-    flash_requested = pyqtSignal(object)
-
     def __init__(self, lang, parent=None):
         super().__init__(parent)
         self._lang = lang
@@ -136,9 +139,9 @@ class DashboardPage(QWidget):
         layout.setContentsMargins(40, 36, 40, 32)
         layout.setSpacing(20)
 
-        title = QLabel(self._lang.get('app_title'))
-        title.setObjectName('pageTitle')
-        layout.addWidget(title)
+        self._page_title = QLabel(self._lang.get('app_title'))
+        self._page_title.setObjectName('pageTitle')
+        layout.addWidget(self._page_title)
 
         self._summary = QLabel('')
         self._summary.setObjectName('pageSubtitle')
@@ -192,7 +195,6 @@ class DashboardPage(QWidget):
 
         for d in drives:
             card = DriveCard(d, self._lang)
-            card.flash_requested.connect(self.flash_requested.emit)
             self._cards.append(card)
             self._card_area.addWidget(card)
 
@@ -214,6 +216,7 @@ class FlashPage(QWidget):
         self._drive = None
         self._mode = ''
         self._deploy_worker = None
+        self._iso_worker = None
         self._build()
 
     def _build(self):
@@ -221,14 +224,66 @@ class FlashPage(QWidget):
         layout.setContentsMargins(40, 36, 40, 32)
         layout.setSpacing(20)
 
-        title = QLabel(self._lang.get('flash_title'))
-        title.setObjectName('pageTitle')
-        layout.addWidget(title)
+        self._page_title = QLabel(self._lang.get('flash_title'))
+        self._page_title.setObjectName('pageTitle')
+        layout.addWidget(self._page_title)
 
         self._drive_info = QLabel(self._lang.get('flash_select'))
         self._drive_info.setObjectName('pageSubtitle')
         self._drive_info.setWordWrap(True)
         layout.addWidget(self._drive_info)
+
+        self._tabs = QTabWidget()
+        self._tabs.setObjectName('flashTabs')
+
+        # --- Tab 1: ISO to USB ---
+        iso_tab = QWidget()
+        iso_layout = QVBoxLayout(iso_tab)
+        iso_layout.setContentsMargins(0, 16, 0, 0)
+        iso_layout.setSpacing(12)
+
+        iso_card = QFrame()
+        iso_card.setObjectName('card')
+        iso_card_layout = QVBoxLayout(iso_card)
+        iso_card_layout.setContentsMargins(24, 20, 24, 20)
+        iso_card_layout.setSpacing(12)
+
+        self._iso_title = QLabel(self._lang.get('iso_title'))
+        self._iso_title.setStyleSheet('font-size: 12pt; font-weight: 600;')
+        iso_card_layout.addWidget(self._iso_title)
+
+        iso_sel_row = QHBoxLayout()
+        iso_sel_row.setSpacing(8)
+        self._iso_combo = QComboBox()
+        self._iso_combo.setMinimumHeight(36)
+        iso_sel_row.addWidget(self._iso_combo, 1)
+        self._btn_iso_browse = QPushButton(self._lang.get('iso_browse'))
+        self._btn_iso_browse.setObjectName('btn_accent')
+        self._btn_iso_browse.setFixedHeight(36)
+        self._btn_iso_browse.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        iso_sel_row.addWidget(self._btn_iso_browse)
+        iso_card_layout.addLayout(iso_sel_row)
+
+        self._iso_info = QLabel('')
+        self._iso_info.setObjectName('statusLabel')
+        self._iso_info.setWordWrap(True)
+        iso_card_layout.addWidget(self._iso_info)
+
+        self._btn_flash_iso = QPushButton(self._lang.get('iso_flash_btn'))
+        self._btn_flash_iso.setObjectName('btn_accent')
+        self._btn_flash_iso.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_flash_iso.setIcon(lucide_icon('zap', 16, '#ffffff'))
+        iso_card_layout.addWidget(self._btn_flash_iso)
+
+        iso_layout.addWidget(iso_card)
+        iso_layout.addStretch()
+        self._tabs.addTab(iso_tab, self._lang.get('tab_iso'))
+
+        # --- Tab 2: Ventoy to USB ---
+        ventoy_tab = QWidget()
+        ventoy_layout = QVBoxLayout(ventoy_tab)
+        ventoy_layout.setContentsMargins(0, 16, 0, 0)
+        ventoy_layout.setSpacing(12)
 
         card = QFrame()
         card.setObjectName('card')
@@ -250,6 +305,24 @@ class FlashPage(QWidget):
         btn_row.addWidget(self._btn_flash)
         card_layout.addLayout(btn_row)
 
+        # Deploy progress (Ventoy-only, inside Ventoy tab card)
+        self._deploy_progress = QProgressBar()
+        self._deploy_progress.setVisible(False)
+        self._deploy_progress.setFixedHeight(6)
+        self._deploy_progress.setTextVisible(False)
+        card_layout.addWidget(self._deploy_progress)
+        self._deploy_progress_label = QLabel('')
+        self._deploy_progress_label.setObjectName('statusLabel')
+        self._deploy_progress_label.setVisible(False)
+        card_layout.addWidget(self._deploy_progress_label)
+
+        ventoy_layout.addWidget(card)
+        ventoy_layout.addStretch()
+        self._tabs.addTab(ventoy_tab, self._lang.get('tab_ventoy'))
+
+        layout.addWidget(self._tabs)
+
+        # Shared progress bar (outside tabs, visible for both ISO and Ventoy)
         progress_row = QHBoxLayout()
         progress_row.setSpacing(10)
         self._progress = QProgressBar()
@@ -261,20 +334,7 @@ class FlashPage(QWidget):
         self._progress_label.setObjectName('statusLabel')
         self._progress_label.setVisible(False)
         progress_row.addWidget(self._progress_label)
-        card_layout.addLayout(progress_row)
-
-        self._deploy_progress = QProgressBar()
-        self._deploy_progress.setVisible(False)
-        self._deploy_progress.setFixedHeight(6)
-        self._deploy_progress.setTextVisible(False)
-        card_layout.addWidget(self._deploy_progress)
-
-        self._deploy_progress_label = QLabel('')
-        self._deploy_progress_label.setObjectName('statusLabel')
-        self._deploy_progress_label.setVisible(False)
-        card_layout.addWidget(self._deploy_progress_label)
-
-        layout.addWidget(card)
+        layout.addLayout(progress_row)
 
         log_card = QFrame()
         log_card.setObjectName('card')
@@ -282,9 +342,9 @@ class FlashPage(QWidget):
         log_layout.setContentsMargins(24, 20, 24, 20)
         log_layout.setSpacing(8)
 
-        log_title = QLabel(self._lang.get('log_title'))
-        log_title.setStyleSheet('font-size: 12pt; font-weight: 600;')
-        log_layout.addWidget(log_title)
+        self._log_title = QLabel(self._lang.get('log_title'))
+        self._log_title.setStyleSheet('font-size: 12pt; font-weight: 600;')
+        log_layout.addWidget(self._log_title)
 
         self._log_area = QVBoxLayout()
         self._log_area.setSpacing(2)
@@ -301,9 +361,96 @@ class FlashPage(QWidget):
         layout.addStretch()
 
         self._btn_flash.clicked.connect(self._on_flash)
+        self._btn_iso_browse.clicked.connect(self._on_iso_browse)
+        self._btn_flash_iso.clicked.connect(self._on_flash_iso)
 
     def set_accent_icon_color(self, color: str):
         self._btn_flash.setIcon(lucide_icon('zap', 16, color))
+        self._btn_flash_iso.setIcon(lucide_icon('zap', 16, color))
+
+    def _on_iso_browse(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, self._lang.get('iso_select'), '',
+            self._lang.get('iso_file_filter')
+        )
+        if path:
+            self._iso_combo.addItem(path, path)
+            self._iso_combo.setCurrentIndex(self._iso_combo.count() - 1)
+            self._update_iso_info(path)
+
+    def _update_iso_info(self, path: str):
+        if is_windows_iso(path):
+            self._iso_info.setText(self._lang.get('iso_windows_info'))
+        else:
+            self._iso_info.setText('')
+
+    def _on_flash_iso(self):
+        if not self._drive:
+            QMessageBox.warning(self, self._lang.get('warning'), self._lang.get('flash_select_drive_first'))
+            return
+
+        iso_path = self._iso_combo.currentData()
+        if not iso_path:
+            QMessageBox.warning(self, self._lang.get('warning'), self._lang.get('iso_no_file'))
+            return
+
+        drive_info = f'{self._drive.model} ({self._drive.size_gb}) \u2013 {self._lang.get("disk_label")} #{self._drive.number}'
+        is_win = is_windows_iso(iso_path)
+        method = self._lang.get('iso_method_windows') if is_win else self._lang.get('iso_method_dd')
+        msg = (
+            f'{self._lang.get("flash_erase_warning")}\n\n{drive_info}\n'
+            f'{iso_path}\n\n'
+            f'{self._lang.get("iso_method_label")}: {method}\n'
+            f'{self._lang.get("flash_data_lost")}\n'
+            f'{self._lang.get("flash_continue")}'
+        )
+        reply = QMessageBox.question(
+            self, self._lang.get('warning'), msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self._start_iso_flash()
+
+    def _start_iso_flash(self):
+        self._btn_flash_iso.setEnabled(False)
+        self._progress.setVisible(True)
+        self._progress_label.setVisible(True)
+        self._progress.setValue(0)
+        self._progress_label.setText(f'0% - {self._lang.get("iso_flashing")}')
+
+        for i in reversed(range(self._log_area.count())):
+            w = self._log_area.itemAt(i).widget()
+            if w:
+                w.setParent(None)
+
+        iso_path = self._iso_combo.currentData()
+        self._iso_worker = create_iso_worker(self._drive.number, iso_path)
+        self._iso_worker.progress.connect(self._on_iso_progress)
+        self._iso_worker.log.connect(self._log)
+        self._iso_worker.finished.connect(self._on_iso_finished)
+        self._iso_worker.start()
+
+    def _on_iso_progress(self, msg: str):
+        self._progress_label.setText(msg)
+        import re
+        m = re.search(r'(\d+)%', msg)
+        if m:
+            self._progress.setValue(int(m.group(1)))
+
+    def _on_iso_finished(self, ok: bool, msg: str):
+        self._btn_flash_iso.setEnabled(True)
+        self._progress.setValue(100 if ok else 0)
+        self._progress_label.setText(
+            self._lang.get('iso_complete') if ok else f'{self._lang.get("iso_failed")} - {msg}'
+        )
+        QTimer.singleShot(3000, lambda: self._progress_label.setVisible(False))
+        QTimer.singleShot(3000, lambda: self._progress.setVisible(False))
+        if ok:
+            QMessageBox.information(self, self._lang.get('success'), self._lang.get('iso_complete'))
+        else:
+            QMessageBox.critical(self, self._lang.get('error'), f'{self._lang.get("iso_failed")}: {msg}')
 
     def set_drive(self, drive: DriveInfo):
         self._drive = drive
@@ -388,7 +535,7 @@ class FlashPage(QWidget):
             QTimer.singleShot(500, self._auto_deploy)
         else:
             self._btn_flash.setEnabled(True)
-            QMessageBox.critical(self, self._lang.get('error'), msg)
+            QMessageBox.critical(self, self._lang.get('error'), f'{self._lang.get("flash_failed")}: {msg}')
 
     _deploy_steps = 0
 
@@ -404,7 +551,7 @@ class FlashPage(QWidget):
                 break
 
         if not theme_source:
-            self._log(f'Theme "{name}" not found, skipping deploy')
+            self._log(self._lang.get('flash_theme_skip').format(name=name))
             self._do_rename()
             return
 
@@ -456,7 +603,7 @@ class FlashPage(QWidget):
             QTimer.singleShot(1000, self._do_rename)
         else:
             self._log(self._lang.get('flash_theme_failed').format(msg=msg))
-            QMessageBox.critical(self, self._lang.get('error'), msg)
+            QMessageBox.critical(self, self._lang.get('error'), f'{self._lang.get("deploy_fail")}: {msg}')
 
     def _do_rename(self):
         self._log(self._lang.get('flash_renaming'))
@@ -515,9 +662,9 @@ class DeployPage(QWidget):
         layout.setContentsMargins(40, 36, 40, 32)
         layout.setSpacing(20)
 
-        title = QLabel(self._lang.get('deploy_title'))
-        title.setObjectName('pageTitle')
-        layout.addWidget(title)
+        self._page_title = QLabel(self._lang.get('deploy_title'))
+        self._page_title.setObjectName('pageTitle')
+        layout.addWidget(self._page_title)
 
         self._drive_info = QLabel(self._lang.get('deploy_select'))
         self._drive_info.setObjectName('pageSubtitle')
@@ -529,9 +676,9 @@ class DeployPage(QWidget):
         t_layout.setContentsMargins(24, 20, 24, 20)
         t_layout.setSpacing(12)
 
-        t_title = QLabel(self._lang.get('deploy_theme'))
-        t_title.setStyleSheet('font-size: 12pt; font-weight: 600;')
-        t_layout.addWidget(t_title)
+        self._t_title = QLabel(self._lang.get('deploy_theme'))
+        self._t_title.setStyleSheet('font-size: 12pt; font-weight: 600;')
+        t_layout.addWidget(self._t_title)
 
         self._theme_combo = QComboBox()
         self._theme_combo.addItem(self._lang.get('theme_default'), '')
@@ -718,25 +865,28 @@ class SettingsPage(QWidget):
         layout.setContentsMargins(40, 36, 40, 32)
         layout.setSpacing(20)
 
-        title = QLabel(self._lang.get('settings_title'))
-        title.setObjectName('pageTitle')
-        layout.addWidget(title)
+        self._page_title = QLabel(self._lang.get('settings_title'))
+        self._page_title.setObjectName('pageTitle')
+        layout.addWidget(self._page_title)
 
-        cards = [
-            (self._lang.get('settings_info'), self._info_section()),
-            (self._lang.get('settings_language'), self._lang_section()),
-            (self._lang.get('settings_theme'), self._theme_section()),
+        self._card_titles = []
+        card_defs = [
+            ('settings_info', self._info_section()),
+            ('settings_language', self._lang_section()),
+            ('settings_theme', self._theme_section()),
         ]
-        for title_text, widget in cards:
+        for key, widget in card_defs:
             card = QFrame()
             card.setObjectName('card')
             cl = QVBoxLayout(card)
             cl.setContentsMargins(24, 20, 24, 20)
             cl.setSpacing(12)
-            ct = QLabel(title_text)
+            ct = QLabel(self._lang.get(key))
+            ct._lang_key = key
             ct.setStyleSheet('font-size: 12pt; font-weight: 600;')
             cl.addWidget(ct)
             cl.addWidget(widget)
+            self._card_titles.append(ct)
             layout.addWidget(card)
 
         layout.addStretch()
@@ -749,7 +899,7 @@ class SettingsPage(QWidget):
         self._info_label.setObjectName('statusLabel')
         self._info_label.setWordWrap(True)
         l.addWidget(self._info_label)
-        self._ventoy_version = QLabel('Ventoy v1.1.12')
+        self._ventoy_version = QLabel(self._lang.get('ventoy_version').format(version='1.1.12'))
         self._ventoy_version.setObjectName('statusLabel')
         l.addWidget(self._ventoy_version)
         return w
@@ -759,8 +909,8 @@ class SettingsPage(QWidget):
         l = QHBoxLayout(w)
         l.setContentsMargins(0, 0, 0, 0)
         self._lang_combo = QComboBox()
-        self._lang_combo.addItem('\u1797\u17b6\u179f\u17b6\u1781\u17d2\u1798\u17c2\u179a', 'km')
-        self._lang_combo.addItem('English', 'en')
+        self._lang_combo.addItem(self._lang.get('khmer'), 'km')
+        self._lang_combo.addItem(self._lang.get('english'), 'en')
         l.addWidget(self._lang_combo)
         l.addStretch()
         self._lang_combo.currentIndexChanged.connect(self._on_lang)
@@ -780,7 +930,7 @@ class SettingsPage(QWidget):
 
     def set_info(self, path: str, version: str = ''):
         self._info_label.setText(path or self._lang.get('settings_tool_name'))
-        self._ventoy_version.setText(f'Ventoy v{version}' if version else 'Ventoy v1.1.12')
+        self._ventoy_version.setText(self._lang.get('ventoy_version').format(version=version or '1.1.12'))
 
     def _on_lang(self, idx):
         code = self._lang_combo.currentData()
@@ -921,7 +1071,6 @@ class KoupreyBootFlashWindow(QMainWindow):
         self._stack = QStackedWidget()
 
         self._dash_page = DashboardPage(self._lang)
-        self._dash_page.flash_requested.connect(self._on_drive_flash_requested)
         self._flash_page = FlashPage(self._lang)
         self._flash_page._main_win = self
         self._deploy_page = DeployPage(self._lang)
@@ -962,10 +1111,6 @@ class KoupreyBootFlashWindow(QMainWindow):
 
         self._btn_lang.clicked.connect(self._on_toggle_lang)
         self._btn_theme.clicked.connect(self._on_toggle_theme)
-
-    def _on_drive_flash_requested(self, drive):
-        self._flash_page.set_drive(drive)
-        self._switch_page('flash', run_on_switch=False)
 
     def _switch_page(self, page_id: str, run_on_switch: bool = True):
         self._current_page = page_id
@@ -1052,15 +1197,55 @@ class KoupreyBootFlashWindow(QMainWindow):
         n = lang.get('khmer') if lang.current_lang == 'km' else lang.get('english')
         self._btn_lang.setText('  ' + n)
 
+        # Dashboard page
+        self._dash_page._page_title.setText(lang.get('app_title'))
         self._dash_page._no_drives.setText(lang.get('no_drives'))
         self._dash_page._refresh_btn.setText(lang.get('btn_refresh'))
+        drives = getattr(self._dash_page, '_last_drives', None)
+        if drives:
+            self._dash_page._summary.setText(
+                lang.get('drives_detected').format(count=len(drives))
+            )
 
+        # Flash page
+        self._flash_page._page_title.setText(lang.get('flash_title'))
         self._flash_page._drive_info.setText(lang.get('flash_select'))
+        self._flash_page._iso_title.setText(lang.get('iso_title'))
+        self._flash_page._log_title.setText(lang.get('log_title'))
         self._flash_page._btn_flash.setText(lang.get('flash_btn'))
+        self._flash_page._btn_flash_iso.setText(lang.get('iso_flash_btn'))
+        self._flash_page._btn_iso_browse.setText(lang.get('iso_browse'))
+        self._flash_page._tabs.setTabText(0, lang.get('tab_iso'))
+        self._flash_page._tabs.setTabText(1, lang.get('tab_ventoy'))
+        if self._flash_page._drive:
+            self._flash_page.set_drive(self._flash_page._drive)
 
+        # Deploy page
+        self._deploy_page._page_title.setText(lang.get('deploy_title'))
         self._deploy_page._drive_info.setText(lang.get('deploy_select'))
+        self._deploy_page._t_title.setText(lang.get('deploy_theme'))
+        self._deploy_page._btn_deploy.setText(lang.get('btn_apply_theme'))
+        self._deploy_page._log_title.setText(lang.get('deploy_log_title'))
+        self._deploy_page._theme_combo.setItemText(0, lang.get('theme_default'))
+        self._deploy_page.refresh_themes()
 
+        # Settings page
+        self._settings_page._page_title.setText(lang.get('settings_title'))
+        for ct in self._settings_page._card_titles:
+            ct.setText(lang.get(ct._lang_key))
         self._settings_page._info_label.setText(lang.get('settings_tool_name'))
+        self._settings_page._ventoy_version.setText(
+            lang.get('ventoy_version').format(version='1.1.12'))
+        self._settings_page._lang_combo.setItemText(0, lang.get('khmer'))
+        self._settings_page._lang_combo.setItemText(1, lang.get('english'))
+        idx = self._settings_page._theme_combo.findData(self._theme_mgr.get_mode())
+        self._settings_page._theme_combo.blockSignals(True)
+        self._settings_page._theme_combo.clear()
+        self._settings_page._theme_combo.addItem(lang.get('settings_light'), 'light')
+        self._settings_page._theme_combo.addItem(lang.get('settings_dark'), 'dark')
+        if idx >= 0:
+            self._settings_page._theme_combo.setCurrentIndex(idx)
+        self._settings_page._theme_combo.blockSignals(False)
 
     def _on_settings_lang_changed(self, code: str):
         self._lang.switch_to(code)

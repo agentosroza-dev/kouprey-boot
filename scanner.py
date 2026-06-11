@@ -38,6 +38,8 @@ class DriveInfo:
         mount_point: str = '',
         device_path: str = '',
         data_mount_point: str = '',
+        boot_type: str = '',
+        os_name: str = '',
     ):
         self.number = number
         self.model = model
@@ -48,6 +50,8 @@ class DriveInfo:
         self.mount_point = mount_point
         self.device_path = device_path
         self.data_mount_point = data_mount_point
+        self.boot_type = boot_type
+        self.os_name = os_name
 
     @property
     def size_gb(self) -> str:
@@ -116,10 +120,16 @@ def list_usb_drives(force_refresh: bool = False) -> list[DriveInfo]:
     def _fetch():
         system = platform.system()
         if system == 'Windows':
-            return _detect_windows_drives()
+            drives = _detect_windows_drives()
         elif system == 'Linux':
-            return _detect_linux_drives()
-        return []
+            drives = _detect_linux_drives()
+        else:
+            return []
+        for d in drives:
+            bt, name = _detect_boot_on_drive(d)
+            d.boot_type = bt
+            d.os_name = name
+        return drives
 
     return _cached('usb_drives', _fetch)
 
@@ -285,6 +295,150 @@ def _parse_lsblk_size(size_str: str) -> int:
 
 def get_platform_name() -> str:
     return platform.system()
+
+
+def _detect_boot_on_path(mount: str) -> tuple[str, str]:
+    if not mount or not os.path.isdir(mount):
+        return ('', '')
+    try:
+        # --- Windows checks (highest priority) ---
+        if os.path.isfile(os.path.join(mount, 'bootmgr')) or os.path.isfile(os.path.join(mount, 'bootmgr.efi')):
+            if os.path.isfile(os.path.join(mount, 'sources', 'install.wim')) or os.path.isfile(os.path.join(mount, 'sources', 'install.esd')):
+                return ('windows', 'Windows Setup')
+            return ('windows', 'Windows')
+
+        if os.path.isfile(os.path.join(mount, 'sources', 'boot.wim')):
+            return ('winpe', 'Windows PE')
+
+        efi_path = os.path.join(mount, 'EFI', 'Microsoft', 'Boot', 'bootmgfw.efi')
+        if os.path.isfile(efi_path):
+            if os.path.isfile(os.path.join(mount, 'sources', 'boot.wim')):
+                return ('winpe', 'Windows PE')
+            return ('windows', 'Windows')
+
+        # --- Linux distro checks ---
+
+        # Ubuntu / derivatives via .disk/info
+        disk_info = os.path.join(mount, '.disk', 'info')
+        if os.path.isfile(disk_info):
+            with open(disk_info, 'r', errors='ignore') as f:
+                content = f.read().lower()
+            if 'ubuntu' in content:
+                return ('ubuntu', 'Ubuntu')
+            if 'mint' in content:
+                return ('mint', 'Linux Mint')
+            if 'debian' in content:
+                return ('debian', 'Debian')
+
+        # Ubuntu live: casper/
+        if os.path.isdir(os.path.join(mount, 'casper')):
+            if os.path.isfile(os.path.join(mount, 'casper', 'vmlinuz')) or os.path.isfile(os.path.join(mount, 'casper', 'vmlinuz.efi')):
+                return ('ubuntu', 'Ubuntu')
+
+        # Fedora live: LiveOS/
+        if os.path.isdir(os.path.join(mount, 'LiveOS')):
+            return ('fedora', 'Fedora')
+
+        # Generic live: live/
+        if os.path.isdir(os.path.join(mount, 'live')):
+            if os.path.isfile(os.path.join(mount, 'live', 'vmlinuz')) or os.path.isfile(os.path.join(mount, 'live', 'vmlinuz.efi')):
+                return ('linux', 'Linux')
+
+        # Grub config parsing
+        grub_cfg = os.path.join(mount, 'boot', 'grub', 'grub.cfg')
+        if os.path.isfile(grub_cfg):
+            with open(grub_cfg, 'r', errors='ignore') as f:
+                content = f.read().lower()
+            if 'ubuntu' in content:
+                return ('ubuntu', 'Ubuntu')
+            if 'mint' in content or 'linuxmint' in content:
+                return ('mint', 'Linux Mint')
+            if 'debian' in content:
+                return ('debian', 'Debian')
+            if 'fedora' in content:
+                return ('fedora', 'Fedora')
+            if 'manjaro' in content:
+                return ('manjaro', 'Manjaro')
+            if 'cachyos' in content or 'cachy' in content:
+                return ('cachyos', 'CachyOS')
+            if 'arch' in content:
+                return ('arch', 'Arch Linux')
+            if 'kali' in content:
+                return ('kali', 'Kali Linux')
+            if 'pop' in content:
+                return ('pop', 'Pop!_OS')
+            if 'opensuse' in content or 'suse' in content:
+                return ('opensuse', 'openSUSE')
+            if 'gentoo' in content:
+                return ('gentoo', 'Gentoo')
+            if 'slackware' in content:
+                return ('slackware', 'Slackware')
+            if 'centos' in content or 'rocky' in content or 'almalinux' in content:
+                return ('redhat', 'Red Hat Linux')
+            if 'linux' in content:
+                return ('linux', 'Linux')
+
+        # Syslinux config parsing
+        for cfg_name in ['syslinux.cfg', 'extlinux.conf', 'isolinux.cfg']:
+            cfg_path = os.path.join(mount, 'syslinux', cfg_name)
+            if not os.path.isfile(cfg_path):
+                cfg_path = os.path.join(mount, 'isolinux', cfg_name)
+            if os.path.isfile(cfg_path):
+                with open(cfg_path, 'r', errors='ignore') as f:
+                    content = f.read().lower()
+                if 'ubuntu' in content:
+                    return ('ubuntu', 'Ubuntu')
+                if 'mint' in content:
+                    return ('mint', 'Linux Mint')
+                if 'debian' in content:
+                    return ('debian', 'Debian')
+                if 'fedora' in content:
+                    return ('fedora', 'Fedora')
+                if 'manjaro' in content:
+                    return ('manjaro', 'Manjaro')
+                if 'cachyos' in content or 'cachy' in content:
+                    return ('cachyos', 'CachyOS')
+                if 'arch' in content:
+                    return ('arch', 'Arch Linux')
+                if 'kali' in content:
+                    return ('kali', 'Kali Linux')
+                if 'linux' in content:
+                    return ('linux', 'Linux')
+
+        # Syslinux / isolinux bootloader presence
+        if os.path.isfile(os.path.join(mount, 'isolinux', 'isolinux.bin')):
+            return ('linux', 'Linux')
+        if os.path.isfile(os.path.join(mount, 'syslinux', 'syslinux.cfg')):
+            return ('linux', 'Linux')
+
+        # Generic UEFI boot
+        if os.path.isfile(os.path.join(mount, 'EFI', 'BOOT', 'BOOTX64.EFI')):
+            return ('linux', 'Linux')
+
+        # Kernel files at root (common for arch, gentoo, etc.)
+        if os.path.isfile(os.path.join(mount, 'vmlinuz')) or os.path.isfile(os.path.join(mount, 'vmlinuz.efi')):
+            return ('linux', 'Linux')
+        if os.path.isfile(os.path.join(mount, 'initrd.img')):
+            return ('linux', 'Linux')
+
+    except Exception:
+        pass
+    return ('', '')
+
+
+def _detect_boot_on_drive(drive: DriveInfo) -> tuple[str, str]:
+    if drive.has_ventoy:
+        return ('ventoy', 'Ventoy')
+    mounts = []
+    if drive.mount_point:
+        mounts.append(drive.mount_point)
+    if drive.data_mount_point and drive.data_mount_point != drive.mount_point:
+        mounts.append(drive.data_mount_point)
+    for mp in mounts:
+        bt, name = _detect_boot_on_path(mp)
+        if bt:
+            return (bt, name)
+    return ('', '')
 
 
 def _theme_pack_name(root: str, themes_dir: str) -> str:
