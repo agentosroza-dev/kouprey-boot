@@ -124,7 +124,6 @@
   "iso_flashing": "Writing ISO to disk...",
   "iso_complete": "ISO written successfully!",
   "iso_failed": "Failed to write ISO",
-  "iso_windows_info": "⚠ Uses Windows mount & copy method (FAT32). Large install.wim will be split automatically. All data will be erased.",
   "iso_method_windows": "Windows mount & copy",
   "iso_method_dd": "DD (raw write)",
   "iso_file_filter": "ISO Files (*.iso);;All Files (*)",

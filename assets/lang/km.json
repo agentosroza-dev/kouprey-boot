@@ -124,7 +124,6 @@
   "iso_flashing": "កំពុងសរសេរ ISO ទៅកាន់ថាស...",
   "iso_complete": "សរសេរ ISO បានជោគជ័យ!",
   "iso_failed": "សរសេរ ISO បរាជ័យ",
-  "iso_windows_info": "⚠ ប្រើវិធី Windows mount & copy (FAT32)។ ឯកសារ install.wim ធំនឹងត្រូវបំបែកដោយស្វ័យប្រវត្តិ។ ទិន្នន័យទាំងអស់នឹងត្រូវបានលុប។",
   "iso_method_windows": "Windows mount & copy",
   "iso_method_dd": "DD (raw write)",
   "iso_file_filter": "ISO Files (*.iso);;All Files (*)",

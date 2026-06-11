@@ -379,10 +379,7 @@ class FlashPage(QWidget):
             self._update_iso_info(path)
 
     def _update_iso_info(self, path: str):
-        if is_windows_iso(path):
-            self._iso_info.setText(self._lang.get('iso_windows_info'))
-        else:
-            self._iso_info.setText('')
+        self._iso_info.setText('')
 
     def _on_flash_iso(self):
         if not self._drive:

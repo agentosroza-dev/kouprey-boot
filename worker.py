@@ -279,6 +279,22 @@ class IsoFlashWorker(QThread):
             pass
         return False
 
+    def _is_winpe_iso(self) -> bool:
+        """Detect WinPE (has boot.wim, no install.wim/esd)."""
+        try:
+            with open(self._iso, 'rb') as f:
+                f.seek(0x8001)
+                if f.read(5) == b'CD001':
+                    f.seek(0)
+                    header = f.read(8388608)
+                    has_boot_wim = b'boot.wim' in header or b'BOOT.WIM' in header
+                    has_install = (b'install.wim' in header or b'INSTALL.WIM' in header or
+                                   b'install.esd' in header or b'INSTALL.ESD' in header)
+                    return has_boot_wim and not has_install
+        except Exception:
+            pass
+        return False
+
     def _clean_disk(self) -> bool:
         import time
         self._log('Cleaning disk...')
@@ -393,11 +409,27 @@ class IsoFlashWorker(QThread):
         except Exception:
             pass
 
+    def _hide_drive_ui(self, drive_letter: str):
+        """Dismiss 'You need to format' dialogs and close Explorer windows for the drive."""
+        try:
+            ps = (
+                f"$vol = Get-Volume -DriveLetter {drive_letter} -ErrorAction SilentlyContinue; "
+                f"$vol | Out-Null; "
+                f"$s = New-Object -ComObject Shell.Application; "
+                f"$s.Windows() | ForEach-Object {{ "
+                f"try {{ if ($_.Document.Folder.Self.Path -eq '{drive_letter}:\\') {{ $_.Quit() }} }} "
+                f"catch {{}} }}"
+            )
+            subprocess.run(
+                ['powershell', '-NoProfile', '-Command', ps],
+                capture_output=True, text=True, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except Exception:
+            pass
+
     def _flash_windows_iso(self) -> bool:
         import time
-        if not self._clean_disk():
-            self._log('Failed to clean disk')
-            return False
 
         drive_letter = self._prepare_and_format_fat32()
         if not drive_letter:
@@ -405,6 +437,7 @@ class IsoFlashWorker(QThread):
             return False
 
         self._log(f'USB formatted as FAT32 on drive {drive_letter}:')
+        self._hide_drive_ui(drive_letter)
         time.sleep(2)
 
         self.progress.emit('Mounting ISO...')
@@ -535,11 +568,14 @@ class IsoFlashWorker(QThread):
                     self._log(f'Failed to copy install.esd: {copy_esd_result.stderr.strip()}')
                     return False
                 self._log('install.esd copied successfully')
+            elif self._is_winpe_iso():
+                self._log('WinPE ISO: only boot.wim present, skipped install.wim/esd')
             else:
                 self._log('No install.wim or install.esd found (may be WinPE)')
 
-            self._log('All Windows files copied successfully')
+            self._log('All files copied successfully to USB')
             self.progress.emit('Files copied!')
+            self._hide_drive_ui(drive_letter)
             return True
         finally:
             self.progress.emit('Cleaning up...')
@@ -614,6 +650,25 @@ class IsoFlashWorker(QThread):
                     return False
                 self._refresh_disk()
                 self.progress.emit('ISO written successfully!')
+                try:
+                    ps = (
+                        f'$parts = Get-Partition -DiskNumber {self._disk} '
+                        f'-ErrorAction SilentlyContinue; '
+                        f'foreach ($p in $parts) {{ '
+                        f'if ($p.DriveLetter -and $p.DriveLetter -ne [char]0) {{ '
+                        f'Write-Output $p.DriveLetter; break }} '
+                        f'}}'
+                    )
+                    pr = subprocess.run(
+                        ['powershell', '-NoProfile', '-Command', ps],
+                        capture_output=True, text=True, timeout=10,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+                    letter = pr.stdout.strip()[:1]
+                    if letter and letter.isalpha():
+                        self._hide_drive_ui(letter.upper())
+                except Exception:
+                    pass
                 return True
 
             else:
@@ -655,7 +710,10 @@ class IsoFlashWorker(QThread):
 
     def _flash_iso(self) -> bool:
         if self._is_windows_iso():
-            self._log('Detected Windows/WinPE ISO - using mount and copy method')
+            if self._is_winpe_iso():
+                self._log('Detected WinPE ISO - using mount and copy method')
+            else:
+                self._log('Detected Windows Setup ISO - using mount and copy method')
             return self._flash_windows_iso()
         else:
             self._log('Detected Linux/hybrid ISO - using raw write method')
