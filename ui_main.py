@@ -23,7 +23,6 @@ PAGES = [
     ('dashboard', 'layout-dashboard', 'nav_dashboard'),
     ('flash', 'zap', 'nav_flash'),
     ('deploy', 'package', 'nav_deploy'),
-    ('settings', 'settings', 'nav_settings'),
 ]
 
 
@@ -40,14 +39,14 @@ class DriveCard(QFrame):
 
     def _build(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
 
         top = QHBoxLayout()
         top.setSpacing(14)
 
         icon_name = 'check-circle' if self.drive.has_ventoy else 'hard-drive'
-        icon_color = '#107C10' if self.drive.has_ventoy else '#707070'
+        icon_color = '#000000' if self.drive.has_ventoy else '#666666'
         icon_lbl = QLabel()
         icon_lbl.setFixedSize(32, 32)
         icon_lbl.setPixmap(lucide_icon(icon_name, 32, icon_color).pixmap(32, 32))
@@ -76,21 +75,21 @@ class DriveCard(QFrame):
         badge = QFrame()
         if self.drive.has_ventoy:
             badge.setStyleSheet(
-                'background: #DFF6DD; border: 1px solid #6CCF6C; '
+                'background: #E8E8E8; border: 1px solid #555555; '
                 'border-radius: 6px; padding: 3px 10px;'
             )
             badge_lbl = QLabel('\u2714 ' + self._lang.get('badge_ventoy'))
             badge_lbl.setStyleSheet(
-                'font-size: 10pt; font-weight: 600; color: #107C10; background: transparent;'
+                'font-size: 10pt; font-weight: 600; color: #000000; background: transparent;'
             )
         else:
             badge.setStyleSheet(
-                'background: #FFF3CD; border: 1px solid #FFC107; '
+                'background: #F0F0F0; border: 1px solid #B0B0B0; '
                 'border-radius: 6px; padding: 3px 10px;'
             )
             badge_lbl = QLabel('\u25cb ' + self._lang.get('badge_no_ventoy'))
             badge_lbl.setStyleSheet(
-                'font-size: 10pt; font-weight: 600; color: #856404; background: transparent;'
+                'font-size: 10pt; font-weight: 600; color: #555555; background: transparent;'
             )
         b_layout = QVBoxLayout(badge)
         b_layout.setContentsMargins(0, 0, 0, 0)
@@ -134,8 +133,8 @@ class DashboardPage(QWidget):
 
     def _build(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 28, 32, 24)
-        layout.setSpacing(14)
+        layout.setContentsMargins(40, 36, 40, 32)
+        layout.setSpacing(20)
 
         title = QLabel(self._lang.get('app_title'))
         title.setObjectName('pageTitle')
@@ -219,8 +218,8 @@ class FlashPage(QWidget):
 
     def _build(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 28, 32, 24)
-        layout.setSpacing(14)
+        layout.setContentsMargins(40, 36, 40, 32)
+        layout.setSpacing(20)
 
         title = QLabel(self._lang.get('flash_title'))
         title.setObjectName('pageTitle')
@@ -234,7 +233,7 @@ class FlashPage(QWidget):
         card = QFrame()
         card.setObjectName('card')
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(20, 16, 20, 16)
+        card_layout.setContentsMargins(24, 20, 24, 20)
         card_layout.setSpacing(12)
 
         self._status = QLabel('')
@@ -249,7 +248,6 @@ class FlashPage(QWidget):
         self._btn_flash.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._btn_flash.setIcon(lucide_icon('zap', 16, '#ffffff'))
         btn_row.addWidget(self._btn_flash)
-        btn_row.addStretch()
         card_layout.addLayout(btn_row)
 
         progress_row = QHBoxLayout()
@@ -281,11 +279,11 @@ class FlashPage(QWidget):
         log_card = QFrame()
         log_card.setObjectName('card')
         log_layout = QVBoxLayout(log_card)
-        log_layout.setContentsMargins(16, 12, 16, 12)
-        log_layout.setSpacing(6)
+        log_layout.setContentsMargins(24, 20, 24, 20)
+        log_layout.setSpacing(8)
 
         log_title = QLabel(self._lang.get('log_title'))
-        log_title.setStyleSheet('font-size: 11pt; font-weight: 600;')
+        log_title.setStyleSheet('font-size: 12pt; font-weight: 600;')
         log_layout.addWidget(log_title)
 
         self._log_area = QVBoxLayout()
@@ -303,6 +301,9 @@ class FlashPage(QWidget):
         layout.addStretch()
 
         self._btn_flash.clicked.connect(self._on_flash)
+
+    def set_accent_icon_color(self, color: str):
+        self._btn_flash.setIcon(lucide_icon('zap', 16, color))
 
     def set_drive(self, drive: DriveInfo):
         self._drive = drive
@@ -511,8 +512,8 @@ class DeployPage(QWidget):
 
     def _build(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 28, 32, 24)
-        layout.setSpacing(14)
+        layout.setContentsMargins(40, 36, 40, 32)
+        layout.setSpacing(20)
 
         title = QLabel(self._lang.get('deploy_title'))
         title.setObjectName('pageTitle')
@@ -525,11 +526,11 @@ class DeployPage(QWidget):
         theme_card = QFrame()
         theme_card.setObjectName('card')
         t_layout = QVBoxLayout(theme_card)
-        t_layout.setContentsMargins(16, 14, 16, 14)
-        t_layout.setSpacing(10)
+        t_layout.setContentsMargins(24, 20, 24, 20)
+        t_layout.setSpacing(12)
 
         t_title = QLabel(self._lang.get('deploy_theme'))
-        t_title.setStyleSheet('font-size: 11pt; font-weight: 600;')
+        t_title.setStyleSheet('font-size: 12pt; font-weight: 600;')
         t_layout.addWidget(t_title)
 
         self._theme_combo = QComboBox()
@@ -540,7 +541,7 @@ class DeployPage(QWidget):
         self._theme_preview = QLabel()
         self._theme_preview.setFixedHeight(80)
         self._theme_preview.setStyleSheet(
-            'background: #2C2C2C; border-radius: 8px; color: #ABABAB;'
+            'background: #1A1A1A; border-radius: 8px; color: #AAAAAA;'
             ' font-size: 9pt; padding: 8px;'
         )
         self._theme_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -576,10 +577,10 @@ class DeployPage(QWidget):
         log_card = QFrame()
         log_card.setObjectName('card')
         log_layout = QVBoxLayout(log_card)
-        log_layout.setContentsMargins(16, 12, 16, 12)
-        log_layout.setSpacing(6)
+        log_layout.setContentsMargins(24, 20, 24, 20)
+        log_layout.setSpacing(8)
         self._log_title = QLabel(self._lang.get('deploy_log_title'))
-        self._log_title.setStyleSheet('font-size: 11pt; font-weight: 600;')
+        self._log_title.setStyleSheet('font-size: 12pt; font-weight: 600;')
         log_layout.addWidget(self._log_title)
 
         self._log_area = QVBoxLayout()
@@ -597,6 +598,9 @@ class DeployPage(QWidget):
         layout.addStretch()
 
         self._btn_deploy.clicked.connect(self._on_deploy)
+
+    def set_accent_icon_color(self, color: str):
+        self._btn_deploy.setIcon(lucide_icon('palette', 16, color))
 
     def set_drive(self, drive: DriveInfo):
         self._drive = drive
@@ -711,8 +715,8 @@ class SettingsPage(QWidget):
 
     def _build(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(32, 28, 32, 24)
-        layout.setSpacing(14)
+        layout.setContentsMargins(40, 36, 40, 32)
+        layout.setSpacing(20)
 
         title = QLabel(self._lang.get('settings_title'))
         title.setObjectName('pageTitle')
@@ -727,10 +731,10 @@ class SettingsPage(QWidget):
             card = QFrame()
             card.setObjectName('card')
             cl = QVBoxLayout(card)
-            cl.setContentsMargins(16, 14, 16, 14)
-            cl.setSpacing(10)
+            cl.setContentsMargins(24, 20, 24, 20)
+            cl.setSpacing(12)
             ct = QLabel(title_text)
-            ct.setStyleSheet('font-size: 11pt; font-weight: 600;')
+            ct.setStyleSheet('font-size: 12pt; font-weight: 600;')
             cl.addWidget(ct)
             cl.addWidget(widget)
             layout.addWidget(card)
@@ -745,7 +749,6 @@ class SettingsPage(QWidget):
         self._info_label.setObjectName('statusLabel')
         self._info_label.setWordWrap(True)
         l.addWidget(self._info_label)
-
         self._ventoy_version = QLabel('Ventoy v1.1.12')
         self._ventoy_version.setObjectName('statusLabel')
         l.addWidget(self._ventoy_version)
@@ -835,47 +838,78 @@ class KoupreyBootFlashWindow(QMainWindow):
     def _build_nav(self, root):
         panel = QFrame()
         panel.setObjectName('navPanel')
-        panel.setFixedWidth(220)
+        panel.setFixedWidth(200)
 
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(10, 20, 10, 16)
-        layout.setSpacing(2)
+        layout.setContentsMargins(6, 12, 6, 12)
+        layout.setSpacing(4)
 
         header_row = QHBoxLayout()
-        header_row.setSpacing(10)
+        header_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         logo = QLabel()
-        logo.setFixedSize(28, 28)
+        logo.setFixedSize(128, 128)
         self._logo_pixmap = logo
         self._update_logo()
         header_row.addWidget(logo)
 
-        name = QLabel('Kouprey\nBoot Flash')
-        name.setObjectName('titleLabel')
-        name.setStyleSheet('font-size: 12pt; font-weight: 700; background: transparent;')
-        name.setToolTip('Ventoy 1.1.12')
-        header_row.addWidget(name)
-
-        header_row.addStretch()
         layout.addLayout(header_row)
-        layout.addSpacing(18)
+        layout.addSpacing(8)
 
         self._nav_btns = {}
         self._nav_icon_map = {}
+        self._nav_indicators = {}
         for pid, picon, plang_key in PAGES:
+            item = QWidget()
+            item_layout = QHBoxLayout(item)
+            item_layout.setContentsMargins(0, 0, 0, 0)
+            item_layout.setSpacing(0)
+
+            indicator = QFrame()
+            indicator.setObjectName('navIndicator')
+            indicator.setFixedWidth(3)
+            indicator.setFixedHeight(24)
+            indicator.setVisible(pid == 'dashboard')
+            self._nav_indicators[pid] = indicator
+            item_layout.addWidget(indicator, alignment=Qt.AlignmentFlag.AlignVCenter)
+
             btn = QPushButton(self._lang.get(plang_key))
             btn.setObjectName('btn_nav')
             btn.setCheckable(True)
             btn.setChecked(pid == 'dashboard')
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            btn.setIcon(lucide_icon(picon, 20, self._current_text_color()))
+            btn.setIcon(lucide_icon(picon, 32, self._current_text_color()))
             btn._icon_name = picon
             btn.clicked.connect(lambda checked, p=pid: self._switch_page(p))
             self._nav_btns[pid] = btn
-            layout.addWidget(btn)
+            item_layout.addWidget(btn)
+            layout.addWidget(item)
 
         layout.addStretch()
+
+        nav_bottom = QFrame()
+        nav_bottom_layout = QVBoxLayout(nav_bottom)
+        nav_bottom_layout.setContentsMargins(0, 0, 0, 0)
+        nav_bottom_layout.setSpacing(2)
+
+        icon_color = self._current_text_color()
+        self._btn_lang = QPushButton()
+        self._btn_lang.setObjectName('btn_nav')
+        self._btn_lang.setIcon(lucide_icon('languages', 20, icon_color))
+        self._btn_lang.setText('  ' + (self._lang.get('khmer') if self._lang.current_lang == 'km' else self._lang.get('english')))
+        self._btn_lang.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_lang.setMinimumHeight(36)
+        nav_bottom_layout.addWidget(self._btn_lang)
+
+        self._btn_theme = QPushButton()
+        self._btn_theme.setObjectName('btn_nav')
+        self._btn_theme.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_theme.setMinimumHeight(36)
+        nav_bottom_layout.addWidget(self._btn_theme)
+        self._update_theme_icon()
+
+        layout.addWidget(nav_bottom)
         root.addWidget(panel)
 
     def _build_main(self, root):
@@ -883,37 +917,6 @@ class KoupreyBootFlashWindow(QMainWindow):
         cl = QVBoxLayout(content)
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(0)
-
-        top = QFrame()
-        top.setFixedHeight(48)
-        tl = QHBoxLayout(top)
-        tl.setContentsMargins(24, 0, 24, 0)
-
-        tl.addStretch()
-
-        icon_color = self._current_text_color()
-        self._btn_lang = QPushButton()
-        self._btn_lang.setObjectName('btn_icon')
-        self._btn_lang.setIcon(lucide_icon('languages', 20, icon_color))
-        self._btn_lang.setToolTip(self._lang.get('lang_tooltip').format(
-            lang=self._lang.get('english')))
-        self._btn_lang.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_lang.setFixedSize(36, 36)
-        tl.addWidget(self._btn_lang)
-
-        self._btn_theme = QPushButton()
-        self._btn_theme.setObjectName('btn_icon')
-        self._btn_theme.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._btn_theme.setFixedSize(36, 36)
-        tl.addWidget(self._btn_theme)
-        self._update_theme_icon()
-
-        cl.addWidget(top)
-
-        sep = QFrame()
-        sep.setFixedHeight(1)
-        sep.setStyleSheet('background: #E0E0E0; border: none;')
-        cl.addWidget(sep)
 
         self._stack = QStackedWidget()
 
@@ -939,15 +942,19 @@ class KoupreyBootFlashWindow(QMainWindow):
         cl.addWidget(self._stack)
 
         footer = QFrame()
+        footer.setObjectName('footer')
         fl = QHBoxLayout(footer)
-        fl.setContentsMargins(24, 6, 24, 6)
+        fl.setContentsMargins(24, 8, 24, 8)
         self._footer_left = QLabel(self._lang.get('footer_creator'))
         self._footer_left.setObjectName('footerLabel')
+        fl.addWidget(self._footer_left)
+
+        fl.addStretch()
+
         self._footer_right = QLabel(
             self._lang.get('footer_copyright') + ' | v' + self._lang.get('version'))
         self._footer_right.setObjectName('footerLabel')
         self._footer_right.setAlignment(Qt.AlignmentFlag.AlignRight)
-        fl.addWidget(self._footer_left)
         fl.addWidget(self._footer_right)
         cl.addWidget(footer)
 
@@ -958,16 +965,19 @@ class KoupreyBootFlashWindow(QMainWindow):
 
     def _on_drive_flash_requested(self, drive):
         self._flash_page.set_drive(drive)
-        self._switch_page('flash')
+        self._switch_page('flash', run_on_switch=False)
 
-    def _switch_page(self, page_id: str):
+    def _switch_page(self, page_id: str, run_on_switch: bool = True):
         self._current_page = page_id
         for pid, btn in self._nav_btns.items():
             btn.setChecked(pid == page_id)
+        for pid, ind in self._nav_indicators.items():
+            ind.setVisible(pid == page_id)
 
         pm = {'dashboard': 0, 'flash': 1, 'deploy': 2, 'settings': 3}
         self._stack.setCurrentIndex(pm.get(page_id, 0))
-        self._on_switch_page()
+        if run_on_switch:
+            self._on_switch_page()
 
     def _on_switch_page(self):
         if self._current_page == 'dashboard':
@@ -992,7 +1002,7 @@ class KoupreyBootFlashWindow(QMainWindow):
 
     def _current_text_color(self):
         c = self._theme_colors
-        return c.TextPrimary if c else '#000000'
+        return c.text_primary if c else '#000000'
 
     def _update_nav_icons(self):
         c = self._current_text_color()
@@ -1006,9 +1016,11 @@ class KoupreyBootFlashWindow(QMainWindow):
         c = self._current_text_color()
         if dark:
             self._btn_theme.setIcon(lucide_icon('moon', 20, c))
+            self._btn_theme.setText('  ' + self._lang.get('theme_tooltip_dark'))
             self._btn_theme.setToolTip(self._lang.get('theme_tooltip_dark'))
         else:
             self._btn_theme.setIcon(lucide_icon('sun', 20, c))
+            self._btn_theme.setText('  ' + self._lang.get('theme_tooltip_light'))
             self._btn_theme.setToolTip(self._lang.get('theme_tooltip_light'))
         self._update_nav_icons()
         if hasattr(self, '_dash_page'):
@@ -1016,13 +1028,13 @@ class KoupreyBootFlashWindow(QMainWindow):
 
     def _update_logo(self):
         dark = self._theme_mgr and self._theme_mgr.get_mode() == 'dark'
-        name = 'Kouprey_Transparancy-White.png' if dark else 'KoupreyTransparancy.png'
-        path = os.path.join(self._base, name)
+        name = 'Kouprey Logo Variations black.png' if dark else 'Kouprey Logo Variations white.png'
+        path = os.path.join(self._base, 'assets', 'icons', name)
         if os.path.exists(path):
             pm = QPixmap(path)
             if not pm.isNull():
                 self._logo_pixmap.setPixmap(pm.scaled(
-                    32, 32, Qt.AspectRatioMode.KeepAspectRatio,
+                    128, 128, Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation))
 
     def _retranslate_ui(self):
@@ -1037,13 +1049,14 @@ class KoupreyBootFlashWindow(QMainWindow):
         self._footer_right.setText(
             lang.get('footer_copyright') + ' | v' + lang.get('version'))
         self._update_theme_icon()
-        n = lang.get('english') if lang.current_lang == 'en' else lang.get('khmer')
-        self._btn_lang.setToolTip(lang.get('lang_tooltip').format(lang=n))
+        n = lang.get('khmer') if lang.current_lang == 'km' else lang.get('english')
+        self._btn_lang.setText('  ' + n)
 
         self._dash_page._no_drives.setText(lang.get('no_drives'))
         self._dash_page._refresh_btn.setText(lang.get('btn_refresh'))
 
         self._flash_page._drive_info.setText(lang.get('flash_select'))
+        self._flash_page._btn_flash.setText(lang.get('flash_btn'))
 
         self._deploy_page._drive_info.setText(lang.get('deploy_select'))
 
@@ -1059,7 +1072,10 @@ class KoupreyBootFlashWindow(QMainWindow):
         self._update_theme_icon()
         self._update_logo()
         c = self._current_text_color()
+        ac = self._theme_colors.accent_text
         self._btn_lang.setIcon(lucide_icon('languages', 20, c))
+        self._flash_page.set_accent_icon_color(ac)
+        self._deploy_page.set_accent_icon_color(ac)
         if hasattr(self, '_dash_page'):
             self._dash_page.set_icon_color(c)
 
@@ -1087,4 +1103,7 @@ class KoupreyBootFlashWindow(QMainWindow):
         self._update_theme_icon()
         self._update_logo()
         c = self._current_text_color()
-        self._btn_lang.setIcon(lucide_icon('languages', 18, c))
+        ac = self._theme_colors.accent_text
+        self._btn_lang.setIcon(lucide_icon('languages', 20, c))
+        self._flash_page.set_accent_icon_color(ac)
+        self._deploy_page.set_accent_icon_color(ac)

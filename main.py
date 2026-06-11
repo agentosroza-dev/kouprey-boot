@@ -48,9 +48,9 @@ def main():
         return
 
     base = os.path.dirname(__file__)
-    png_path = os.path.join(base, 'KoupreyTransparancy.png')
-    if os.path.exists(png_path):
-        icon = QIcon(png_path)
+    ico_path = os.path.join(base, 'assets', 'icons', 'Kouprey Logo Variations.ico')
+    if os.path.exists(ico_path):
+        icon = QIcon(ico_path)
         app.setWindowIcon(icon)
 
     app.setApplicationName('Kouprey-Boot-Flash')
