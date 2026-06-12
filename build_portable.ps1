@@ -8,6 +8,7 @@ $DistDir = Join-Path $ProjectDir "dist"
 
 $WindowedFlag = if (-not $Console) { "--windowed" } else { "" }
 
+$IconPath = Join-Path $ProjectDir "assets\icons\Kouprey Logo Variations.ico"
 $PyInstallerArgs = @(
     "--onefile"
     $WindowedFlag
@@ -17,9 +18,8 @@ $PyInstallerArgs = @(
     "--add-data", "assets;assets"
     "--add-data", "lucide\lucide.zip;lucide"
     "--add-data", "lucide\__init__.py;lucide"
-    "--add-data", "KoupreyTransparancy.png;."
-    "--add-data", "Kouprey_Transparancy-White.png;."
     "--hidden-import", "PyQt6.QtSvg"
+    "--icon", $IconPath
     "--clean"
     "--noconfirm"
     "main.py"

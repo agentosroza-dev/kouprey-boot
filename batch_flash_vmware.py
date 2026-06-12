@@ -78,6 +78,34 @@ def detach_vhd(vhd_path: str):
     )
 
 
+def hide_drive_ui(disk_number: int):
+    """Hide all drive letters on the given disk and suppress 'Format disk' prompt."""
+    try:
+        subprocess.run(
+            ['powershell', '-NoProfile', '-Command',
+             f'$shell = New-Object -ComObject Shell.Application; '
+             f'$shell.Windows() | ForEach-Object {{ try {{ '
+             f'  $parts = Get-Partition -DiskNumber {disk_number} -ErrorAction SilentlyContinue; '
+             f'  foreach ($part in $parts) {{ '
+             f'    if ($part.DriveLetter -and $_.Document.Folder.Self.Path -eq "$($part.DriveLetter):\\") {{ '
+             f'      $_.Quit() }} }} '
+             f'}} catch {{}} }}; '
+             f'Get-Partition -DiskNumber {disk_number} -ErrorAction SilentlyContinue '
+             f'| Where-Object {{ $_.DriveLetter }} '
+             f'| ForEach-Object {{ '
+             f'  Remove-PartitionAccessPath -DiskNumber {disk_number} '
+             f'    -PartitionNumber $_.PartitionNumber '
+             f'    -AccessPath "$($_.DriveLetter):\\" -ErrorAction SilentlyContinue; '
+             f'  Set-Partition -DiskNumber {disk_number} -PartitionNumber $_.PartitionNumber '
+             f'    -IsHidden $true -ErrorAction SilentlyContinue '
+             f'}}'],
+            capture_output=True, text=True, timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except Exception:
+        pass
+
+
 def get_iso_type(iso_path: str) -> str:
     """Return 'windows', 'winpe', or 'linux' (informational only).
     All types use raw write for VMware VHDs.
@@ -369,6 +397,9 @@ def process_iso(iso_path: str, index: int, total: int) -> bool:
     try:
         ok = raw_write_iso(iso_path, disk_num,
                            lambda p: progress_bar(10 + int(p * 0.85), f'Writing raw... {iso_name}'))
+        if ok:
+            log('Suppressing Windows format prompt...')
+            hide_drive_ui(disk_num)
     finally:
         progress_bar(95, 'Detaching VHD...')
         detach_vhd(vhd_path)

@@ -23,6 +23,53 @@ if not os.path.isfile(VENTOY_EXE):
     VENTOY_EXE = os.path.join(VENTOY_DIR, 'Ventoy2Disk.exe')
 
 
+def hide_drive_ui(disk_number: int, drive_letter: str):
+    """Hide drive from Explorer and suppress 'Format disk' prompt."""
+    try:
+        subprocess.run(
+            ['powershell', '-NoProfile', '-Command', f'''
+$disk = {disk_number}
+$dl = '{drive_letter}'
+$shell = New-Object -ComObject Shell.Application
+$shell.Windows() | ForEach-Object {{
+    try {{
+        $p = $_.Document.Folder.Self.Path
+        if (-not $dl) {{
+            $parts = Get-Partition -DiskNumber $disk -ErrorAction SilentlyContinue
+            foreach ($part in $parts) {{
+                if ($part.DriveLetter -and $p -eq "$($part.DriveLetter):\\") {{
+                    $_.Quit()
+                }}
+            }}
+        }} elseif ($p -eq "$dl`:\\" -or $p -like "*$dl*") {{
+            $_.Quit()
+        }}
+    }} catch {{}}
+}}
+if ($dl) {{
+    try {{
+        $part = Get-Partition -DriveLetter $dl -ErrorAction Stop
+        Remove-PartitionAccessPath -DiskNumber $part.DiskNumber `
+            -PartitionNumber $part.PartitionNumber `
+            -AccessPath "$dl`:\\" -ErrorAction SilentlyContinue
+    }} catch {{}}
+}} else {{
+    Get-Partition -DiskNumber $disk -ErrorAction SilentlyContinue |
+        Where-Object {{ $_.DriveLetter }} |
+        ForEach-Object {{
+            Remove-PartitionAccessPath -DiskNumber $disk `
+                -PartitionNumber $_.PartitionNumber `
+                -AccessPath "$($_.DriveLetter):\\" -ErrorAction SilentlyContinue
+        }}
+}}
+'''],
+            capture_output=True, text=True, timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except Exception:
+        pass
+
+
 class VentoyFlashWorker(QThread):
     progress = pyqtSignal(str)
     finished = pyqtSignal(bool, str)
@@ -88,6 +135,8 @@ class VentoyFlashWorker(QThread):
 
             if result.returncode == 0:
                 self._log('Ventoy2Disk completed successfully')
+                self._log('Suppressing Windows format prompt...')
+                hide_drive_ui(self._disk_number, '')
                 return True
             else:
                 self._log(f'Ventoy2Disk exited with code {result.returncode}')
@@ -617,33 +666,7 @@ $shell.Windows() | ForEach-Object {{
             except Exception:
                 pass
             return
-
-        dl = drive_letter
-        try:
-            subprocess.run(
-                ['powershell', '-NoProfile', '-Command', f'''
-$dl = '{dl}'
-# Close Explorer windows pointing to this drive
-$shell = New-Object -ComObject Shell.Application
-$shell.Windows() | ForEach-Object {{
-    try {{
-        $p = $_.Document.Folder.Self.Path
-        if ($p -eq "$dl`:\\" -or $p -like "*$dl*") {{ $_.Quit() }}
-    }} catch {{}}
-}}
-# Remove drive letter to hide from Explorer
-try {{
-    $part = Get-Partition -DriveLetter $dl -ErrorAction Stop
-    Remove-PartitionAccessPath -DiskNumber $part.DiskNumber `
-        -PartitionNumber $part.PartitionNumber `
-        -AccessPath "$dl`:\\" -ErrorAction SilentlyContinue
-}} catch {{}}
-'''],
-                capture_output=True, text=True, timeout=15,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-        except Exception:
-            pass
+        hide_drive_ui(self._disk, drive_letter)
 
     def _flash_windows_iso(self) -> bool:
         import time
@@ -799,6 +822,7 @@ try {{
 
             self._log('All files copied successfully to USB')
             self.progress.emit('Files copied!')
+            self._hide_drive_ui(drive_letter)
             return True
         finally:
             self.progress.emit('Cleaning up...')
@@ -873,6 +897,7 @@ try {{
                     return False
                 self._refresh_disk()
                 self.progress.emit('ISO written successfully!')
+                self._hide_drive_ui('')
                 try:
                     subprocess.run(
                         ['powershell', '-NoProfile', '-Command',
