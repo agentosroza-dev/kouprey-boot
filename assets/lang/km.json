@@ -129,7 +129,7 @@
   "iso_file_filter": "ISO Files (*.iso);;All Files (*)",
   "iso_method_label": "វិធីសាស្រ្ត",
   "tab_iso": "ISO ទៅ USB",
-  "tab_ventoy": "Ventoy ទៅ USB",
+  "tab_ventoy": "Ventoy Linux",
   "english": "English",
   "khmer": "ភាសាខ្មែរ"
 }

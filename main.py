@@ -1,7 +1,6 @@
 import os
 import sys
 import platform
-import ctypes
 
 os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '1'
 os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '1'
@@ -16,23 +15,36 @@ from language import LanguageManager
 
 def _is_admin():
     try:
-        return ctypes.windll.shell32.IsUserAnAdmin()
+        if platform.system() == 'Windows':
+            import ctypes
+            return ctypes.windll.shell32.IsUserAnAdmin()
+        else:
+            return os.geteuid() == 0
     except Exception:
         return False
 
 
 def _elevate():
+    sys_name = platform.system()
     script = os.path.abspath(sys.argv[0])
-    ctypes.windll.shell32.ShellExecuteW(
-        None, 'runas', sys.executable, f'"{script}"',
-        os.path.dirname(script), 1
-    )
+    if sys_name == 'Windows':
+        import ctypes
+        ctypes.windll.shell32.ShellExecuteW(
+            None, 'runas', sys.executable, f'"{script}"',
+            os.path.dirname(script), 1
+        )
+    else:
+        os.execvp('sudo', ['sudo', '-E', sys.executable, script] + sys.argv[1:])
 
 
 def main():
     sys_name = platform.system()
 
     if sys_name == 'Windows' and not _is_admin():
+        _elevate()
+        return
+    elif sys_name == 'Linux' and not _is_admin():
+        print('This tool requires root privileges. Please run with sudo.')
         _elevate()
         return
 
@@ -62,7 +74,7 @@ def main():
 
     if sys_name == 'Linux':
         font = QFont('Ubuntu', 11)
-        font.setFamilies(['Ubuntu', 'Noto Sans', 'sans-serif'])
+        font.setFamilies(['Ubuntu', 'Liberation Sans', 'sans-serif'])
     else:
         font = QFont('Leelawadee UI', 11)
     font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)

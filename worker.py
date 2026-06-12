@@ -1,5 +1,6 @@
 import os
 import sys
+import platform
 import subprocess
 import shutil
 import datetime
@@ -7,6 +8,18 @@ import tempfile
 import json
 
 from PyQt6.QtCore import QThread, pyqtSignal
+
+
+_SYSTEM = platform.system()
+
+
+def _no_window():
+    if _SYSTEM == 'Windows':
+        try:
+            return subprocess.CREATE_NO_WINDOW
+        except AttributeError:
+            return 0
+    return 0
 
 
 def _create_log_file(prefix: str) -> str:
@@ -18,13 +31,19 @@ def _create_log_file(prefix: str) -> str:
 
 _base = getattr(sys, '_MEIPASS', os.path.dirname(__file__))
 VENTOY_DIR = os.path.join(_base, 'assets', 'ventoy-1.1.12')
-VENTOY_EXE = os.path.join(VENTOY_DIR, 'altexe', 'Ventoy2Disk_X64.exe')
-if not os.path.isfile(VENTOY_EXE):
-    VENTOY_EXE = os.path.join(VENTOY_DIR, 'Ventoy2Disk.exe')
+
+if _SYSTEM == 'Linux':
+    VENTOY_EXE = os.path.join(VENTOY_DIR, 'Ventoy2Disk.sh')
+else:
+    VENTOY_EXE = os.path.join(VENTOY_DIR, 'altexe', 'Ventoy2Disk_X64.exe')
+    if not os.path.isfile(VENTOY_EXE):
+        VENTOY_EXE = os.path.join(VENTOY_DIR, 'Ventoy2Disk.exe')
 
 
 def hide_drive_ui(disk_number: int, drive_letter: str):
-    """Hide drive from Explorer and suppress 'Format disk' prompt."""
+    """Hide drive from Explorer (Windows) or suppress format prompt. No-op on Linux."""
+    if _SYSTEM != 'Windows':
+        return
     try:
         subprocess.run(
             ['powershell', '-NoProfile', '-Command', f'''
@@ -64,7 +83,7 @@ if ($dl) {{
 }}
 '''],
             capture_output=True, text=True, timeout=15,
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            creationflags=_no_window(),
         )
     except Exception:
         pass
@@ -113,40 +132,69 @@ class VentoyFlashWorker(QThread):
         exe = VENTOY_EXE
 
         if not os.path.isfile(exe):
-            self._log(f'Ventoy2Disk not found at {exe}')
+            self._log(f'Ventoy binary not found at {exe}')
             return False
 
-        self._log(f'Running: {exe} -I -s -g {disk}')
-        self.progress.emit(f'Running Ventoy2Disk on disk #{disk}...')
+        if _SYSTEM == 'Linux':
+            self._log(f'Running: sh {exe} -I -s /dev/sd{chr(97 + disk)}')
+            self.progress.emit(f'Running Ventoy2Disk on /dev/sd{chr(97 + disk)}...')
+            try:
+                result = subprocess.run(
+                    ['sh', exe, '-I', '-s', f'/dev/sd{chr(97 + disk)}'],
+                    capture_output=True, text=True, timeout=300,
+                )
+                stdout = result.stdout.strip()
+                stderr = result.stderr.strip()
+                if stdout:
+                    for line in stdout.splitlines():
+                        self._log(line)
+                if stderr:
+                    self._log(f'STDERR: {stderr}')
 
-        try:
-            result = subprocess.run(
-                [exe, '-I', '-s', '-g', str(disk)],
-                capture_output=True, text=True, timeout=300,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            stdout = result.stdout.strip()
-            stderr = result.stderr.strip()
-            if stdout:
-                for line in stdout.splitlines():
-                    self._log(line)
-            if stderr:
-                self._log(f'STDERR: {stderr}')
-
-            if result.returncode == 0:
-                self._log('Ventoy2Disk completed successfully')
-                self._log('Suppressing Windows format prompt...')
-                hide_drive_ui(self._disk_number, '')
-                return True
-            else:
-                self._log(f'Ventoy2Disk exited with code {result.returncode}')
+                if result.returncode == 0:
+                    self._log('Ventoy installed successfully on Linux')
+                    return True
+                else:
+                    self._log(f'Ventoy2Disk.sh exited with code {result.returncode}')
+                    return False
+            except subprocess.TimeoutExpired:
+                self._log('Ventoy2Disk.sh timed out (5 min)')
                 return False
-        except subprocess.TimeoutExpired:
-            self._log('Ventoy2Disk timed out (5 min)')
-            return False
-        except Exception as e:
-            self._log(f'Error running Ventoy2Disk: {e}')
-            return False
+            except Exception as e:
+                self._log(f'Error running Ventoy2Disk.sh: {e}')
+                return False
+        else:
+            self._log(f'Running: {exe} -I -s -g {disk}')
+            self.progress.emit(f'Running Ventoy2Disk on disk #{disk}...')
+
+            try:
+                result = subprocess.run(
+                    [exe, '-I', '-s', '-g', str(disk)],
+                    capture_output=True, text=True, timeout=300,
+                    creationflags=_no_window(),
+                )
+                stdout = result.stdout.strip()
+                stderr = result.stderr.strip()
+                if stdout:
+                    for line in stdout.splitlines():
+                        self._log(line)
+                if stderr:
+                    self._log(f'STDERR: {stderr}')
+
+                if result.returncode == 0:
+                    self._log('Ventoy2Disk completed successfully')
+                    self._log('Suppressing Windows format prompt...')
+                    hide_drive_ui(self._disk_number, '')
+                    return True
+                else:
+                    self._log(f'Ventoy2Disk exited with code {result.returncode}')
+                    return False
+            except subprocess.TimeoutExpired:
+                self._log('Ventoy2Disk timed out (5 min)')
+                return False
+            except Exception as e:
+                self._log(f'Error running Ventoy2Disk: {e}')
+                return False
 
 
 class VentoyDeployWorker(QThread):
@@ -242,16 +290,37 @@ class VentoyDeployWorker(QThread):
 
 
 def rename_volume(drive_letter: str, new_label: str) -> bool:
-    try:
-        result = subprocess.run(
-            ['powershell', '-NoProfile', '-Command',
-             f'Set-Volume -DriveLetter "{drive_letter}" -NewFileSystemLabel "{new_label}"'],
-            capture_output=True, text=True, timeout=30,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+    if _SYSTEM == 'Windows':
+        try:
+            result = subprocess.run(
+                ['powershell', '-NoProfile', '-Command',
+                 f'Set-Volume -DriveLetter "{drive_letter}" -NewFileSystemLabel "{new_label}"'],
+                capture_output=True, text=True, timeout=30,
+                creationflags=_no_window(),
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+    else:
+        try:
+            device = f'/dev/{drive_letter}'
+            if not os.path.exists(device):
+                return False
+            for cmd in (['fatlabel', device, new_label],
+                        ['exfatlabel', device, new_label],
+                        ['ntfslabel', device, new_label],
+                        ['e2label', device, new_label]):
+                try:
+                    result = subprocess.run(
+                        cmd, capture_output=True, text=True, timeout=30
+                    )
+                    if result.returncode == 0:
+                        return True
+                except FileNotFoundError:
+                    continue
+            return False
+        except Exception:
+            return False
 
 
 class IsoFlashWorker(QThread):
@@ -264,8 +333,7 @@ class IsoFlashWorker(QThread):
         self._disk = disk_number
         self._iso = iso_path
         self._device_path = device_path
-        import platform
-        self._system = platform.system()
+        self._system = _SYSTEM
         self._log_path = ''
 
     def _log(self, msg: str):
@@ -368,7 +436,7 @@ class IsoFlashWorker(QThread):
                 ['powershell', '-NoProfile', '-Command',
                  f'Set-Disk -Number {self._disk} -IsOffline $false -ErrorAction SilentlyContinue'],
                 capture_output=True, text=True, timeout=15,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_no_window(),
             )
         except Exception:
             pass
@@ -385,7 +453,7 @@ class IsoFlashWorker(QThread):
             subprocess.run(
                 ['powershell', '-NoProfile', '-Command', unmount_ps],
                 capture_output=True, text=True, timeout=30,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_no_window(),
             )
         except Exception:
             pass
@@ -401,7 +469,7 @@ class IsoFlashWorker(QThread):
             cr = subprocess.run(
                 ['powershell', '-NoProfile', '-Command', clear_ps],
                 capture_output=True, text=True, timeout=120,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_no_window(),
             )
             if cr.returncode == 0:
                 self._log('Clear-Disk succeeded')
@@ -429,7 +497,7 @@ class IsoFlashWorker(QThread):
                     ['diskpart'],
                     input=script,
                     capture_output=True, text=True, timeout=120,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    creationflags=_no_window(),
                 )
             except subprocess.TimeoutExpired:
                 self._log('diskpart clean timed out')
@@ -488,7 +556,7 @@ class IsoFlashWorker(QThread):
             r = subprocess.run(
                 ['powershell', '-NoProfile', '-Command', ps_code],
                 capture_output=True, text=True, timeout=60,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_no_window(),
             )
             return r.returncode == 0
         except Exception as e:
@@ -513,7 +581,7 @@ $shell.Windows() | ForEach-Object {{
 }}
 '''],
                 capture_output=True, text=True, timeout=15,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_no_window(),
             )
         except Exception:
             pass
@@ -598,7 +666,7 @@ $shell.Windows() | ForEach-Object {{
                 ['diskpart'],
                 input=script,
                 capture_output=True, text=True, timeout=120,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_no_window(),
             )
             out = result.stdout.strip()
             if out:
@@ -625,7 +693,7 @@ $shell.Windows() | ForEach-Object {{
             pr = subprocess.run(
                 ['powershell', '-NoProfile', '-Command', ps_cmd],
                 capture_output=True, text=True, timeout=15,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_no_window(),
             )
             letter = pr.stdout.strip()[:1]
             if letter and letter.isalpha():
@@ -651,7 +719,7 @@ $shell.Windows() | ForEach-Object {{
             subprocess.run(
                 ['powershell', '-NoProfile', '-Command', ps_cmd],
                 capture_output=True, text=True, timeout=15,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_no_window(),
             )
         except Exception:
             pass
@@ -661,7 +729,7 @@ $shell.Windows() | ForEach-Object {{
             try:
                 subprocess.Popen(
                     ['explorer', f'{drive_letter}:\\'],
-                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    creationflags=_no_window(),
                 )
             except Exception:
                 pass
@@ -690,7 +758,7 @@ $shell.Windows() | ForEach-Object {{
         mount_result = subprocess.run(
             ['powershell', '-NoProfile', '-Command', mount_cmd],
             capture_output=True, text=True, timeout=30,
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            creationflags=_no_window(),
         )
         mount_out = mount_result.stdout.strip()
         if 'MOUNT:FAIL' in mount_out or mount_result.returncode != 0:
@@ -708,7 +776,7 @@ $shell.Windows() | ForEach-Object {{
             vol_result = subprocess.run(
                 ['powershell', '-NoProfile', '-Command', ps_cmd],
                 capture_output=True, text=True, timeout=15,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_no_window(),
             )
             iso_letter = vol_result.stdout.strip()[:1]
             if not iso_letter or not iso_letter.isalpha() or iso_letter.upper() == 'N':
@@ -726,7 +794,7 @@ $shell.Windows() | ForEach-Object {{
             copy_result = subprocess.run(
                 ['powershell', '-NoProfile', '-Command', copy_cmd],
                 capture_output=True, text=True, timeout=3600,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_no_window(),
             )
             if copy_result.returncode >= 8:
                 self._log(f'File copy failed (robocopy exit code {copy_result.returncode})')
@@ -741,7 +809,7 @@ $shell.Windows() | ForEach-Object {{
             wim_check = subprocess.run(
                 ['powershell', '-NoProfile', '-Command', check_wim_cmd],
                 capture_output=True, text=True, timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_no_window(),
             )
             has_wim = 'EXISTS' in wim_check.stdout
 
@@ -749,7 +817,7 @@ $shell.Windows() | ForEach-Object {{
             esd_check = subprocess.run(
                 ['powershell', '-NoProfile', '-Command', check_esd_cmd],
                 capture_output=True, text=True, timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_no_window(),
             )
             has_esd = 'EXISTS' in esd_check.stdout
 
@@ -759,7 +827,7 @@ $shell.Windows() | ForEach-Object {{
                 size_result = subprocess.run(
                     ['powershell', '-NoProfile', '-Command', size_cmd],
                     capture_output=True, text=True, timeout=10,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    creationflags=_no_window(),
                 )
                 wim_size = int(size_result.stdout.strip()) if size_result.stdout.strip().isdigit() else 0
                 self._log(f'install.wim size: {wim_size} bytes ({wim_size / (1024*1024*1024):.2f} GB)')
@@ -774,7 +842,7 @@ $shell.Windows() | ForEach-Object {{
                     split_result = subprocess.run(
                         ['powershell', '-NoProfile', '-Command', split_cmd],
                         capture_output=True, text=True, timeout=1800,
-                        creationflags=subprocess.CREATE_NO_WINDOW,
+                        creationflags=_no_window(),
                     )
                     if split_result.returncode != 0:
                         dism_err = split_result.stderr.strip()
@@ -795,7 +863,7 @@ $shell.Windows() | ForEach-Object {{
                     copy_wim_result = subprocess.run(
                         ['powershell', '-NoProfile', '-Command', copy_wim_cmd],
                         capture_output=True, text=True, timeout=1800,
-                        creationflags=subprocess.CREATE_NO_WINDOW,
+                        creationflags=_no_window(),
                     )
                     if copy_wim_result.returncode != 0:
                         self._log(f'Failed to copy install.wim: {copy_wim_result.stderr.strip()}')
@@ -809,7 +877,7 @@ $shell.Windows() | ForEach-Object {{
                 copy_esd_result = subprocess.run(
                     ['powershell', '-NoProfile', '-Command', copy_esd_cmd],
                     capture_output=True, text=True, timeout=1800,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    creationflags=_no_window(),
                 )
                 if copy_esd_result.returncode != 0:
                     self._log(f'Failed to copy install.esd: {copy_esd_result.stderr.strip()}')
@@ -833,7 +901,7 @@ $shell.Windows() | ForEach-Object {{
                 subprocess.run(
                     ['powershell', '-NoProfile', '-Command', dismount_cmd],
                     capture_output=True, text=True, timeout=15,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    creationflags=_no_window(),
                 )
             except Exception:
                 pass
@@ -879,7 +947,7 @@ $shell.Windows() | ForEach-Object {{
                 result = subprocess.run(
                     ['powershell', '-NoProfile', '-Command', ps_code],
                     capture_output=True, text=True, timeout=3600,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    creationflags=_no_window(),
                 )
                 for line in result.stdout.splitlines():
                     line = line.strip()
@@ -910,7 +978,7 @@ $shell.Windows() | ForEach-Object {{
                          f'}} ; '
                          f'Set-Disk -Number {self._disk} -IsOffline $true -ErrorAction SilentlyContinue'],
                         capture_output=True, text=True, timeout=30,
-                        creationflags=subprocess.CREATE_NO_WINDOW,
+                        creationflags=_no_window(),
                     )
                 except Exception:
                     pass

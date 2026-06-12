@@ -101,10 +101,16 @@ class ThemeInfo:
 
 def _run_powershell(script: str, timeout: int = 10) -> str:
     try:
+        kwargs = {
+            'capture_output': True, 'text': True, 'timeout': timeout,
+        }
+        if platform.system() == 'Windows':
+            try:
+                kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+            except AttributeError:
+                pass
         result = subprocess.run(
-            ['powershell', '-NoProfile', '-Command', script],
-            capture_output=True, text=True, timeout=timeout,
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            ['powershell', '-NoProfile', '-Command', script], **kwargs
         )
         if result.returncode == 0:
             return result.stdout.strip()
@@ -226,6 +232,7 @@ def _detect_linux_drives() -> list[DriveInfo]:
     except Exception:
         return drives
 
+    usb_index = 0
     for dev in data.get('blockdevices', []):
         if dev.get('TYPE') != 'disk':
             continue
@@ -260,16 +267,17 @@ def _detect_linux_drives() -> list[DriveInfo]:
                 break
 
         drives.append(DriveInfo(
-            number=0,
+            number=usb_index,
             model=model,
             size_bytes=size_bytes,
             is_removable=True,
             is_usb=True,
             has_ventoy=has_ventoy,
             mount_point=mount,
-            data_mount_point=data_mount,
             device_path=f'/dev/{name}',
+            data_mount_point=data_mount,
         ))
+        usb_index += 1
 
     return drives
 

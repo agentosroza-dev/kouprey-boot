@@ -6,7 +6,7 @@ Usage:
   flash_headless.py -deploy -disk 2 -theme Window11 # Deploy theme
   flash_headless.py -rename -disk 2      # Rename data partition to KOUPREYDATA
 """
-import os, sys, argparse, datetime, tempfile, json, subprocess
+import os, sys, argparse, datetime, tempfile, json, subprocess, platform
 
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '0'
@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import QApplication
 from worker import create_flash_worker, create_deploy_worker
 
 LOG_DIR = os.path.join(tempfile.gettempdir(), 'kouprey-boot')
+_SYSTEM = platform.system()
 
 
 def log(msg, log_path=None):
@@ -89,39 +90,7 @@ def do_deploy(disk_number, theme_name):
     theme_source = theme_map[theme_name]
     log(f'Theme source: {theme_source}', log_path)
 
-    proc = subprocess.run(['powershell', '-NoProfile', '-Command', f'''
-    $disk = Get-Disk -Number {disk_number} -ErrorAction SilentlyContinue
-    if (-not $disk) {{ exit 1 }}
-    $parts = Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue
-    $result = @()
-    foreach ($part in $parts) {{
-        $vol = Get-Volume -Partition $part -ErrorAction SilentlyContinue
-        $letter = if ($vol.DriveLetter) {{ $vol.DriveLetter + ":\\" }} else {{ "" }}
-        $label = if ($vol.FileSystemLabel) {{ $vol.FileSystemLabel }} else {{ "" }}
-        $result += [PSCustomObject]@{{
-            Number = $part.PartitionNumber
-            DriveLetter = $letter
-            Label = $label
-        }}
-    }}
-    $result | ConvertTo-Json
-    '''], capture_output=True, text=True, timeout=15,
-        creationflags=subprocess.CREATE_NO_WINDOW)
-
-    if proc.returncode != 0:
-        log(f'ERROR: Could not query disk #{disk_number}', log_path)
-        return False, 'Could not query disk'
-
-    partitions = json.loads(proc.stdout) if proc.stdout.strip() else []
-    if not isinstance(partitions, list):
-        partitions = [partitions]
-    data_mount = ''
-    for p in partitions:
-        label = p.get('Label', '')
-        letter = p.get('DriveLetter', '')
-        if label not in ('VTOYEFI', '') and letter and not data_mount:
-            data_mount = letter.rstrip('\\')
-
+    data_mount = _find_data_mount(disk_number, log_path)
     if not data_mount:
         log('ERROR: No data partition found', log_path)
         return False, 'No data partition found'
@@ -166,57 +135,142 @@ def do_rename(disk_number, label='KOUPREYDATA'):
     log_path = os.path.join(LOG_DIR, f'rename_{datetime.datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
     log(f'=== RENAME: Disk #{disk_number} -> {label} ===', log_path)
 
-    proc = subprocess.run(['powershell', '-NoProfile', '-Command', f'''
-    $disk = Get-Disk -Number {disk_number} -ErrorAction SilentlyContinue
-    if (-not $disk) {{ exit 1 }}
-    $parts = Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue
-    $result = @()
-    foreach ($part in $parts) {{
-        $vol = Get-Volume -Partition $part -ErrorAction SilentlyContinue
-        $letter = if ($vol.DriveLetter) {{ $vol.DriveLetter + ":\\" }} else {{ "" }}
-        $label = if ($vol.FileSystemLabel) {{ $vol.FileSystemLabel }} else {{ "" }}
-        $result += [PSCustomObject]@{{
-            Number = $part.PartitionNumber
-            DriveLetter = $letter
-            Label = $label
+    if _SYSTEM == 'Windows':
+        proc = subprocess.run(['powershell', '-NoProfile', '-Command', f'''
+        $disk = Get-Disk -Number {disk_number} -ErrorAction SilentlyContinue
+        if (-not $disk) {{ exit 1 }}
+        $parts = Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue
+        $result = @()
+        foreach ($part in $parts) {{
+            $vol = Get-Volume -Partition $part -ErrorAction SilentlyContinue
+            $letter = if ($vol.DriveLetter) {{ $vol.DriveLetter + ":\\" }} else {{ "" }}
+            $label = if ($vol.FileSystemLabel) {{ $vol.FileSystemLabel }} else {{ "" }}
+            $result += [PSCustomObject]@{{
+                Number = $part.PartitionNumber
+                DriveLetter = $letter
+                Label = $label
+            }}
         }}
-    }}
-    $result | ConvertTo-Json
-    '''], capture_output=True, text=True, timeout=15,
-        creationflags=subprocess.CREATE_NO_WINDOW)
+        $result | ConvertTo-Json
+        '''], capture_output=True, text=True, timeout=15)
 
-    if proc.returncode != 0:
-        log(f'ERROR: Could not query disk #{disk_number}', log_path)
-        return False, 'Could not query disk'
+        if proc.returncode != 0:
+            log(f'ERROR: Could not query disk #{disk_number}', log_path)
+            return False, 'Could not query disk'
 
-    partitions = json.loads(proc.stdout) if proc.stdout.strip() else []
-    if not isinstance(partitions, list):
-        partitions = [partitions]
-    drive_letter = ''
-    for p in partitions:
-        label_val = p.get('Label', '')
-        letter = p.get('DriveLetter', '')
-        if label_val not in ('VTOYEFI', '') and letter:
-            drive_letter = letter.rstrip(':\\')
-            break
+        partitions = json.loads(proc.stdout) if proc.stdout.strip() else []
+        if not isinstance(partitions, list):
+            partitions = [partitions]
+        drive_letter = ''
+        for p in partitions:
+            label_val = p.get('Label', '')
+            letter = p.get('DriveLetter', '')
+            if label_val not in ('VTOYEFI', '') and letter:
+                drive_letter = letter.rstrip(':\\')
+                break
 
-    if not drive_letter:
-        log('ERROR: No data partition with drive letter found', log_path)
-        return False, 'No data partition found'
+        if not drive_letter:
+            log('ERROR: No data partition with drive letter found', log_path)
+            return False, 'No data partition found'
 
-    log(f'  Renaming drive {drive_letter}: to {label}', log_path)
-    rename_proc = subprocess.run(
-        ['powershell', '-NoProfile', '-Command',
-         f'Set-Volume -DriveLetter "{drive_letter}" -NewFileSystemLabel "{label}"'],
-        capture_output=True, text=True, timeout=30,
-        creationflags=subprocess.CREATE_NO_WINDOW)
+        log(f'  Renaming drive {drive_letter}: to {label}', log_path)
+        rename_proc = subprocess.run(
+            ['powershell', '-NoProfile', '-Command',
+             f'Set-Volume -DriveLetter "{drive_letter}" -NewFileSystemLabel "{label}"'],
+            capture_output=True, text=True, timeout=30)
 
-    ok = rename_proc.returncode == 0
-    if ok:
-        log(f'Rename successful: {drive_letter}: -> {label}', log_path)
+        ok = rename_proc.returncode == 0
+        if ok:
+            log(f'Rename successful: {drive_letter}: -> {label}', log_path)
+        else:
+            log(f'Rename failed: {rename_proc.stderr}', log_path)
+        return ok, f'Renamed to {label}' if ok else 'Rename failed'
     else:
-        log(f'Rename failed: {rename_proc.stderr}', log_path)
-    return ok, f'Renamed to {label}' if ok else 'Rename failed'
+        mount = _find_data_mount(disk_number, log_path)
+        if not mount:
+            return False, 'No data partition found'
+        log(f'  Renaming mount {mount} to {label}', log_path)
+        from worker import rename_volume
+        import re
+        m = re.match(r'/dev/(\w+)', mount)
+        if m:
+            dev_name = m.group(1)
+            ok = rename_volume(dev_name, label)
+        else:
+            log(f'  Could not determine device from mount {mount}', log_path)
+            return False, 'Could not determine device'
+        if ok:
+            log(f'Rename successful: {mount} -> {label}', log_path)
+        else:
+            log(f'Rename failed', log_path)
+        return ok, f'Renamed to {label}' if ok else 'Rename failed'
+
+
+def _find_data_mount(disk_number: int, log_path: str = '') -> str:
+    if _SYSTEM == 'Windows':
+        proc = subprocess.run(['powershell', '-NoProfile', '-Command', f'''
+        $disk = Get-Disk -Number {disk_number} -ErrorAction SilentlyContinue
+        if (-not $disk) {{ exit 1 }}
+        $parts = Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue
+        $result = @()
+        foreach ($part in $parts) {{
+            $vol = Get-Volume -Partition $part -ErrorAction SilentlyContinue
+            $letter = if ($vol.DriveLetter) {{ $vol.DriveLetter + ":\\" }} else {{ "" }}
+            $label = if ($vol.FileSystemLabel) {{ $vol.FileSystemLabel }} else {{ "" }}
+            $result += [PSCustomObject]@{{
+                Number = $part.PartitionNumber
+                DriveLetter = $letter
+                Label = $label
+            }}
+        }}
+        $result | ConvertTo-Json
+        '''], capture_output=True, text=True, timeout=15)
+
+        if proc.returncode != 0:
+            return ''
+
+        partitions = json.loads(proc.stdout) if proc.stdout.strip() else []
+        if not isinstance(partitions, list):
+            partitions = [partitions]
+        for p in partitions:
+            label = p.get('Label', '')
+            letter = p.get('DriveLetter', '')
+            if label not in ('VTOYEFI', '') and letter:
+                return letter.rstrip('\\')
+        return ''
+    else:
+        try:
+            import re
+            result = subprocess.run(
+                ['lsblk', '-J', '-o', 'NAME,MOUNTPOINT,LABEL'],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0:
+                return ''
+            data = json.loads(result.stdout)
+            usb_idx = 0
+            for dev in data.get('blockdevices', []):
+                if dev.get('TYPE') != 'disk':
+                    continue
+                if usb_idx != disk_number:
+                    usb_idx += 1
+                    continue
+                def _walk(parts):
+                    for p in (parts or []):
+                        label = p.get('LABEL', '')
+                        mp = p.get('MOUNTPOINT', '')
+                        name = p.get('NAME', '')
+                        if label not in ('VTOYEFI', '') and mp:
+                            return mp
+                        if p.get('children'):
+                            sub = _walk(p['children'])
+                            if sub:
+                                return sub
+                    return ''
+                return _walk(dev.get('children', []))
+        except Exception:
+            return ''
+        return ''
 
 
 if __name__ == '__main__':
