@@ -82,16 +82,113 @@ def get_iso_type(iso_path: str) -> str:
 
 
 def clean_disk(disk_number: int) -> bool:
-    script = (
-        f'select disk {disk_number}\n'
-        f'clean\n'
-        f'exit\n'
-    )
-    r = subprocess.run(
-        ['diskpart'], input=script, capture_output=True, text=True, timeout=60,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-    )
-    return r.returncode == 0 and 'DiskPart has encountered an error' not in r.stdout
+    log('Cleaning disk...')
+
+    # Close Explorer windows and unmount volumes first
+    try:
+        subprocess.run(
+            ['powershell', '-NoProfile', '-Command',
+             f'$dl = (Get-Partition -DiskNumber {disk_number} -ErrorAction SilentlyContinue '
+             f'| Where-Object {{ $_.DriveLetter }} | Select-Object -First 1).DriveLetter; '
+             f'if ($dl) {{ '
+             f'  $shell = New-Object -ComObject Shell.Application; '
+             f'  $shell.Windows() | ForEach-Object {{ '
+             f'    try {{ if ($_.Document.Folder.Self.Path -eq "$dl`:\\") {{ $_.Quit() }} }} catch {{}} }}; '
+             f'  Remove-PartitionAccessPath -DiskNumber {disk_number} '
+             f'    -PartitionNumber (Get-Partition -DiskNumber {disk_number} '
+             f'      -ErrorAction SilentlyContinue | Where-Object {{ $_.DriveLetter }} '
+             f'      | Select-Object -First 1 -ExpandProperty PartitionNumber) '
+             f"    -AccessPath \"$dl`:\\\" -ErrorAction SilentlyContinue "
+             f'}}'],
+            capture_output=True, text=True, timeout=30,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except Exception:
+        pass
+    time.sleep(2)
+
+    # Try Clear-Disk first (works better on removable media)
+    log('Attempting Clear-Disk via PowerShell...')
+    try:
+        cr = subprocess.run(
+            ['powershell', '-NoProfile', '-Command',
+             f'Clear-Disk -Number {disk_number} -RemoveData -RemoveOEM '
+             f'-PassThru -ErrorAction SilentlyContinue'],
+            capture_output=True, text=True, timeout=120,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        if cr.returncode == 0:
+            log('Clear-Disk succeeded')
+            time.sleep(2)
+            return True
+        err = cr.stderr.strip() or cr.stdout.strip()[:200]
+        log(f'Clear-Disk failed: {err}')
+    except Exception as e:
+        log(f'Clear-Disk error: {e}')
+
+    for attempt in range(3):
+        log(f'diskpart clean attempt {attempt + 1}/3')
+        script = (
+            f'select disk {disk_number}\n'
+            f'attributes disk clear readonly\n'
+            f'clean\n'
+            f'exit\n'
+        )
+        r = subprocess.run(
+            ['diskpart'], input=script, capture_output=True, text=True, timeout=120,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        out = r.stdout.strip()
+        if 'Access is denied' in out or 'not supported on removable media' in out:
+            log('diskpart clean unavailable, zeroing MBR directly...')
+            if zero_mbr_fallback(disk_number):
+                log('MBR zeroed successfully')
+                time.sleep(2)
+                return True
+            log('ERROR: Cannot clean disk - close programs accessing this drive')
+            return False
+        if 'DiskPart has encountered an error' in out or r.returncode != 0:
+            log(f'Attempt {attempt + 1} failed, retrying...')
+            time.sleep(3)
+            continue
+        log('diskpart clean completed')
+        time.sleep(2)
+        return True
+    log('diskpart clean failed after 3 attempts')
+
+    # Last resort
+    log('Attempting MBR zero as last resort...')
+    if zero_mbr_fallback(disk_number):
+        log('MBR zeroed successfully')
+        time.sleep(2)
+        return True
+    return False
+
+
+def zero_mbr_fallback(disk_number: int) -> bool:
+    """Zero out the first 10MB to remove partition table on removable media."""
+    device = rf'\\.\PhysicalDrive{disk_number}'
+    try:
+        ps = (
+            f"$dev = @\"\n{device}\n\"@; "
+            f"$stream = [System.IO.File]::Open($dev, "
+            f"[System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, "
+            f"[System.IO.FileShare]::ReadWrite); "
+            f"try {{ "
+            f"  $buf = New-Object byte[] 10485760; "
+            f"  $stream.Write($buf, 0, $buf.Length); "
+            f"}} finally {{ $stream.Close() }} "
+            f"Write-Output 'DONE'"
+        )
+        r = subprocess.run(
+            ['powershell', '-NoProfile', '-Command', ps],
+            capture_output=True, text=True, timeout=60,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        return r.returncode == 0
+    except Exception as e:
+        log(f'MBR zero failed: {e}')
+        return False
 
 
 def hide_drive_ui(drive_letter: str):
@@ -353,9 +450,29 @@ def flash_one(iso_path: str, disk_number: int, index: int, total: int) -> bool:
     progress_bar(100, iso_name)
     print()
 
-    letter = find_drive_letter(disk_number)
-    if letter:
-        hide_drive_ui(letter)
+    if iso_type not in ('windows', 'winpe'):
+        # Take disk offline after raw write to suppress Windows "Format disk" prompt
+        log('Suppressing Windows format prompt...')
+        try:
+            subprocess.run(
+                ['powershell', '-NoProfile', '-Command',
+                 f'Get-Partition -DiskNumber {disk_number} -ErrorAction SilentlyContinue '
+                 f'| Where-Object {{ $_.DriveLetter }} '
+                 f'| ForEach-Object {{ '
+                 f'  Remove-PartitionAccessPath -DiskNumber {disk_number} '
+                 f'    -PartitionNumber $_.PartitionNumber '
+                 f"    -AccessPath \"$($_.DriveLetter):\\\" -ErrorAction SilentlyContinue; "
+                 f'}} ; '
+                 f'Set-Disk -Number {disk_number} -IsOffline $true -ErrorAction SilentlyContinue'],
+                capture_output=True, text=True, timeout=30,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except Exception:
+            pass
+    else:
+        letter = find_drive_letter(disk_number)
+        if letter:
+            hide_drive_ui(letter)
 
     log(f'OK: {iso_name}')
     return True

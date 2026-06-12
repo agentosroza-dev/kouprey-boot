@@ -423,7 +423,7 @@ class FlashPage(QWidget):
                 w.setParent(None)
 
         iso_path = self._iso_combo.currentData()
-        self._iso_worker = create_iso_worker(self._drive.number, iso_path)
+        self._iso_worker = create_iso_worker(self._drive.number, iso_path, self._drive.device_path)
         self._iso_worker.progress.connect(self._on_iso_progress)
         self._iso_worker.log.connect(self._log)
         self._iso_worker.finished.connect(self._on_iso_finished)
