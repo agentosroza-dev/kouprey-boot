@@ -16,7 +16,7 @@ from scanner import (
     list_usb_drives, list_available_themes,
     DriveInfo, ThemeInfo,
 )
-from worker import create_flash_worker, create_deploy_worker, create_iso_worker, rename_volume, is_windows_iso
+from worker import create_flash_worker, create_deploy_worker, create_iso_worker, rename_volume, is_windows_iso, show_drive_ui
 
 
 PAGES = [
@@ -630,6 +630,7 @@ class FlashPage(QWidget):
     def _finish_all(self, rename_ok: bool):
         list_usb_drives(force_refresh=True)
         self._btn_flash.setEnabled(False)
+        show_drive_ui(self._drive.number)
         QTimer.singleShot(2000, lambda: self._deploy_progress.setVisible(False))
         QTimer.singleShot(2000, lambda: self._deploy_progress_label.setVisible(False))
 

@@ -23,6 +23,47 @@ if not os.path.isfile(VENTOY_EXE):
     VENTOY_EXE = os.path.join(VENTOY_DIR, 'Ventoy2Disk.exe')
 
 
+def show_drive_ui(disk_number: int):
+    """Assign a drive letter to the data partition and open Explorer."""
+    try:
+        subprocess.run(
+            ['powershell', '-NoProfile', '-Command', f'''
+$disk = {disk_number}
+$parts = Get-Partition -DiskNumber $disk -ErrorAction SilentlyContinue
+$dataPart = $parts | Where-Object {{
+    $vol = Get-Volume -Partition $_ -ErrorAction SilentlyContinue
+    $vol -and $vol.FileSystemLabel -ne "VTOYEFI"
+}} | Select-Object -First 1
+$letter = $null
+if ($dataPart -and -not $dataPart.DriveLetter) {{
+    $used = (Get-Volume).DriveLetter | Where-Object {{ $_ }} | ForEach-Object {{ "$_`:" }}
+    for ($l = [char]'Z'; $l -ge [char]'C'; $l--) {{
+        $dl = [char]$l
+        if ($used -notcontains "$dl`:") {{
+            Add-PartitionAccessPath -DiskNumber $disk `
+                -PartitionNumber $dataPart.PartitionNumber `
+                -AccessPath "$dl`:\" -ErrorAction SilentlyContinue
+            $letter = $dl
+            break
+        }}
+    }}
+}} elseif ($dataPart) {{
+    $letter = $dataPart.DriveLetter
+}}
+if ($letter) {{
+    try {{
+        $shell = New-Object -ComObject Shell.Application
+        $shell.Open("$letter`:\\")
+    }} catch {{}}
+}}
+'''],
+            capture_output=True, text=True, timeout=15,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except Exception:
+        pass
+
+
 def hide_drive_ui(disk_number: int, drive_letter: str):
     """Hide drive from Explorer and suppress 'Format disk' prompt."""
     try:
@@ -135,8 +176,6 @@ class VentoyFlashWorker(QThread):
 
             if result.returncode == 0:
                 self._log('Ventoy2Disk completed successfully')
-                self._log('Suppressing Windows format prompt...')
-                hide_drive_ui(self._disk_number, '')
                 return True
             else:
                 self._log(f'Ventoy2Disk exited with code {result.returncode}')
@@ -197,17 +236,20 @@ class VentoyDeployWorker(QThread):
         theme_dir = os.path.join(ventoy_dir, 'theme')
         os.makedirs(theme_dir, exist_ok=True)
 
+        self.progress.emit('Cleaning old theme...')
         for item in os.listdir(theme_dir):
             item_path = os.path.join(theme_dir, item)
             if os.path.isdir(item_path):
                 shutil.rmtree(item_path)
             else:
                 os.remove(item_path)
+        self._log('Old theme cleaned')
 
         if not self._theme_source or not os.path.isdir(self._theme_source):
             self._log(f'Theme source not found: {self._theme_source}')
             return False
 
+        self.progress.emit('Copying theme files...')
         self._log(f'Copying theme from {self._theme_source} to {theme_dir}')
         for item in os.listdir(self._theme_source):
             s = os.path.join(self._theme_source, item)
@@ -218,6 +260,7 @@ class VentoyDeployWorker(QThread):
                 shutil.copy2(s, d)
         self._log('Theme files copied to ventoy/theme/')
 
+        self.progress.emit('Deploying ventoy.json...')
         plugin_src = os.path.join(VENTOY_DIR, 'plugin', 'ventoy', 'ventoy.json')
         plugin_dst = os.path.join(ventoy_dir, 'ventoy.json')
         if os.path.isfile(plugin_src):
