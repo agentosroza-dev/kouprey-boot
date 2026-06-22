@@ -1,3 +1,4 @@
+import re
 import os
 import sys
 import subprocess
@@ -5,6 +6,8 @@ import shutil
 import datetime
 import tempfile
 import json
+import struct
+import threading
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -21,6 +24,7 @@ VENTOY_DIR = os.path.join(_base, 'assets', 'ventoy-1.1.12')
 VENTOY_EXE = os.path.join(VENTOY_DIR, 'altexe', 'Ventoy2Disk_X64.exe')
 if not os.path.isfile(VENTOY_EXE):
     VENTOY_EXE = os.path.join(VENTOY_DIR, 'Ventoy2Disk.exe')
+DD_EXE = os.path.join(_base, 'assets', 'dd', 'dd.exe')
 
 
 def show_drive_ui(disk_number: int):
@@ -302,13 +306,10 @@ class IsoFlashWorker(QThread):
     finished = pyqtSignal(bool, str)
     log = pyqtSignal(str)
 
-    def __init__(self, disk_number: int, iso_path: str, device_path: str = ''):
+    def __init__(self, iso_path: str, disk_number: int):
         super().__init__()
-        self._disk = disk_number
-        self._iso = iso_path
-        self._device_path = device_path
-        import platform
-        self._system = platform.system()
+        self._iso_path = iso_path
+        self._disk_number = disk_number
         self._log_path = ''
 
     def _log(self, msg: str):
@@ -323,732 +324,268 @@ class IsoFlashWorker(QThread):
 
     def run(self):
         self._log_path = _create_log_file('iso_flash')
-        self._log(f'ISO flash starting on disk #{self._disk}')
-        self._log(f'ISO: {self._iso}')
-        self._log(f'Log: {self._log_path}')
+        iso_name = os.path.basename(self._iso_path)
+        iso_size = os.path.getsize(self._iso_path)
+        size_gb = iso_size / (1024 ** 3)
+        self._log(f'ISO flash: {iso_name} ({size_gb:.1f} GB) -> Disk #{self._disk_number}')
+        self._log(f'Log file: {self._log_path}')
+        self.progress.emit('0%')
 
         try:
-            ok = self._flash_iso()
+            ok = self._flash()
             if ok:
-                self.progress.emit('ISO written successfully!')
+                self.progress.emit('100%')
                 self._log('ISO written successfully!')
                 self.finished.emit(True, f'ISO written.\nLog: {self._log_path}')
             else:
-                self.finished.emit(False, f'ISO flash failed.\nLog: {self._log_path}')
+                self.finished.emit(False, f'ISO write failed.\nLog: {self._log_path}')
         except Exception as e:
             self._log(f'Exception: {e}')
             self.finished.emit(False, str(e))
 
-    def _is_windows_iso(self) -> bool:
-        try:
-            import zipfile
-            if zipfile.is_zipfile(self._iso):
-                with zipfile.ZipFile(self._iso, 'r') as zf:
-                    names_lower = [n.lower().replace('\\', '/') for n in zf.namelist()]
-                    for marker in ('sources/install.wim', 'sources/install.esd',
-                                   'boot/bootmgr', 'bootmgr', 'setup.exe'):
-                        if any(n == marker or n.endswith('/' + marker) for n in names_lower):
-                            return True
-                    return False
-        except Exception:
-            pass
-        try:
-            with open(self._iso, 'rb') as f:
-                f.seek(0x8001)
-                magic = f.read(5)
-                if magic == b'CD001':
-                    f.seek(0)
-                    header = f.read(8388608)
-                    markers = (b'INSTALL.WIM', b'INSTALL.ESD', b'install.wim',
-                               b'install.esd', b'BOOTMGR', b'bootmgr',
-                               b'SETUP.EXE', b'setup.exe',
-                               b'BOOT.WIM', b'boot.wim',
-                               b'WINSETUP', b'WinSetup')
-                    for marker in markers:
-                        if marker in header:
-                            return True
-                    return False
-        except Exception:
-            pass
-        return False
+    def _flash(self) -> bool:
+        iso_path = self._iso_path
+        disk_number = self._disk_number
+        device = rf'\\.\PhysicalDrive{disk_number}'
 
-    def _is_winpe_iso(self) -> bool:
-        """Detect WinPE (has boot.wim, no install.wim/esd)."""
-        try:
-            with open(self._iso, 'rb') as f:
-                f.seek(0x8001)
-                if f.read(5) == b'CD001':
-                    f.seek(0)
-                    header = f.read(8388608)
-                    has_boot_wim = b'boot.wim' in header or b'BOOT.WIM' in header
-                    has_install = (b'install.wim' in header or b'INSTALL.WIM' in header or
-                                   b'install.esd' in header or b'INSTALL.ESD' in header)
-                    return has_boot_wim and not has_install
-        except Exception:
-            pass
-        return False
+        if not os.path.isfile(DD_EXE):
+            self._log(f'dd.exe not found at {DD_EXE}')
+            return False
 
-    def _clean_disk(self) -> bool:
-        self._log('Cleaning disk...')
-        self.progress.emit('Preparing disk...')
-        if self._system == 'Windows':
-            return self._clean_disk_windows()
-        else:
-            return self._clean_disk_linux()
+        iso_size = os.path.getsize(iso_path)
+        iso_size_mb = iso_size / (1024 * 1024)
+        self._log(f'ISO: {os.path.basename(iso_path)} ({iso_size_mb:.0f} MB)')
 
-    def _clean_disk_windows(self) -> bool:
+        self._log(f'Preparing Disk #{disk_number} (unmount + clean)...')
+        self._unmount_disk(disk_number)
+
         import time
-        self._log(f'Cleaning disk #{self._disk} (Windows)...')
 
-        # Step 1: Close all Explorer windows and release handles
-        self._close_explorer_for_disk()
+        for attempt in range(1, 4):
+            if attempt > 1:
+                self._log(f'Retry attempt {attempt}/3...')
+                self._unmount_disk(disk_number)
 
-        # Step 2: Remove all partition drive letters via PowerShell
-        self._log('Removing volume mount points...')
-        try:
-            # Take disk offline first to release locks
-            subprocess.run(
-                ['powershell', '-NoProfile', '-Command',
-                 f'Set-Disk -Number {self._disk} -IsOffline $false -ErrorAction SilentlyContinue'],
-                capture_output=True, text=True, timeout=15,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-        except Exception:
-            pass
-        try:
-            unmount_ps = (
-                f'Get-Partition -DiskNumber {self._disk} -ErrorAction SilentlyContinue '
-                f'| Where-Object {{ $_.DriveLetter }} '
-                f'| ForEach-Object {{ '
-                f'  Remove-PartitionAccessPath -DiskNumber {self._disk} '
-                f'    -PartitionNumber $_.PartitionNumber '
-                f"    -AccessPath \"$($_.DriveLetter):\\\" -ErrorAction SilentlyContinue; "
-                f'  $_.DriveLetter }}'
-            )
-            subprocess.run(
-                ['powershell', '-NoProfile', '-Command', unmount_ps],
-                capture_output=True, text=True, timeout=30,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-        except Exception:
-            pass
-        time.sleep(2)
+            self._log(f'Writing to {device} with dd (bs=1M --progress)...')
 
-        # Step 3: Try Clear-Disk first (works better on removable media)
-        self._log('Attempting Clear-Disk via PowerShell...')
-        try:
-            clear_ps = (
-                f'Clear-Disk -Number {self._disk} -RemoveData -RemoveOEM '
-                f'-PassThru -ErrorAction Stop'
-            )
-            cr = subprocess.run(
-                ['powershell', '-NoProfile', '-Command', clear_ps],
-                capture_output=True, text=True, timeout=120,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            if cr.returncode == 0:
-                self._log('Clear-Disk succeeded')
-                time.sleep(2)
-                return True
-            else:
-                err = cr.stderr.strip() or cr.stdout.strip()[:200]
-                self._log(f'Clear-Disk failed: {err}')
-        except subprocess.TimeoutExpired:
-            self._log('Clear-Disk timed out (120s)')
-        except Exception as e:
-            self._log(f'Clear-Disk error: {e}')
+            args = [
+                DD_EXE,
+                f'if={iso_path}',
+                f'of={device}',
+                'bs=1M',
+                '--progress',
+            ]
 
-        # Step 4: Fallback to diskpart clean (up to 3 attempts)
-        for attempt in range(3):
-            self._log(f'diskpart clean attempt {attempt + 1}/3')
-            script = (
-                f'select disk {self._disk}\n'
-                f'attributes disk clear readonly\n'
-                f'clean\n'
-                f'exit\n'
-            )
             try:
-                result = subprocess.run(
-                    ['diskpart'],
-                    input=script,
-                    capture_output=True, text=True, timeout=120,
+                popen = subprocess.Popen(
+                    args,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
                     creationflags=subprocess.CREATE_NO_WINDOW,
                 )
-            except subprocess.TimeoutExpired:
-                self._log('diskpart clean timed out')
-                continue
-            except Exception as e:
-                self._log(f'diskpart error: {e}')
-                continue
-
-            out = result.stdout.strip()
-            if out:
-                for line in out.splitlines():
-                    self._log(f'  diskpart: {line.strip()}')
-            if 'Access is denied' in out or 'not supported on removable media' in out:
-                self._log('diskpart clean not available, zeroing MBR directly...')
-                # Fallback: zero out the first few MB of the disk to remove partition table
-                if self._zero_mbr():
-                    self._log('MBR zeroed successfully')
-                    time.sleep(2)
-                    return True
-                self._log('ERROR: Cannot clean disk - please close all programs accessing this drive')
-                self.progress.emit('ERROR: Close programs accessing this drive')
+            except FileNotFoundError:
+                self._log(f'dd.exe not found at {DD_EXE}')
                 return False
-            if 'DiskPart has encountered an error' in out or result.returncode != 0:
-                self._log(f'clean attempt {attempt + 1} failed, retrying...')
-                time.sleep(3)
-                continue
-            self._log('diskpart clean completed')
-            time.sleep(2)
-            return True
-        self._log('diskpart clean failed after 3 attempts')
 
-        # Step 5: Last resort - zero MBR directly
-        self._log('Attempting MBR zero as last resort...')
-        if self._zero_mbr():
-            self._log('MBR zeroed successfully')
-            time.sleep(2)
-            return True
+            stderr_lines = []
+
+            def read_stderr():
+                for line in iter(popen.stderr.readline, ''):
+                    stderr_lines.append(line.strip())
+
+            t = threading.Thread(target=read_stderr, daemon=True)
+            t.start()
+
+            last_pct = -1
+            try:
+                for line in iter(popen.stdout.readline, ''):
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    pct = -1
+                    if '%' in line:
+                        parts = line.split()
+                        if len(parts) >= 2 and parts[1].endswith('%'):
+                            try:
+                                pct = int(parts[1].rstrip('%'))
+                            except (ValueError, IndexError):
+                                pass
+                    elif re.match(r'^[\d,]+$', line):
+                        try:
+                            bytes_written = int(line.replace(',', ''))
+                            if iso_size > 0:
+                                pct = int(bytes_written * 100 / iso_size)
+                        except (ValueError, IndexError):
+                            pass
+
+                    if pct >= 0 and pct != last_pct:
+                        last_pct = pct
+                        self.progress.emit(f'{pct}%')
+
+                popen.wait(timeout=7200)
+                t.join(timeout=5)
+
+                for line in stderr_lines:
+                    if line:
+                        self._log(line)
+
+                locked = any(
+                    keyword in line.lower()
+                    for line in stderr_lines
+                    for keyword in ('being used by another process', 'access is denied',
+                                    'error opening', 'error writing', 'cannot write')
+                )
+
+                if locked and attempt < 3:
+                    self._log(f'Disk locked, retrying in 2s...')
+                    time.sleep(2)
+                    continue
+
+                if locked:
+                    self._log('dd failed after 3 attempts (disk still locked)')
+                    return False
+
+                if popen.returncode == 0:
+                    self._log(f'dd completed ({iso_size_mb:.0f} MB written)')
+                    self._log('Suppressing format prompt...')
+                    hide_drive_ui(disk_number, '')
+                    return True
+                else:
+                    self._log(f'dd exited with code {popen.returncode}')
+                    return False
+
+            except subprocess.TimeoutExpired:
+                self._log('dd timed out (2 hours)')
+                try:
+                    popen.kill()
+                except Exception:
+                    pass
+                return False
+            except Exception as e:
+                self._log(f'dd error: {e}')
+                return False
+
         return False
 
-    def _zero_mbr(self) -> bool:
-        """Zero out the first few MB to remove partition table on removable media."""
-        import time
-        device = rf'\\.\PhysicalDrive{self._disk}'
+    def _unmount_disk(self, disk_number: int):
         try:
-            ps_code = (
-                f"$dev = @\"\n{device}\n\"@; "
-                f"$stream = [System.IO.File]::Open($dev, "
-                f"[System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, "
-                f"[System.IO.FileShare]::ReadWrite); "
-                f"try {{ "
-                f"  $buf = New-Object byte[] 10485760; "
-                f"  $stream.Write($buf, 0, $buf.Length); "
-                f"}} finally {{ $stream.Close() }} "
-                f"Write-Output 'DONE'"
-            )
-            r = subprocess.run(
-                ['powershell', '-NoProfile', '-Command', ps_code],
-                capture_output=True, text=True, timeout=60,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            return r.returncode == 0
-        except Exception as e:
-            self._log(f'MBR zero failed: {e}')
-            return False
+            hide_drive_ui(disk_number, '')
 
-    def _close_explorer_for_disk(self):
-        import time
-        self._log('Closing Explorer windows for disk...')
-        try:
-            subprocess.run(
-                ['powershell', '-NoProfile', '-Command', f'''
-$dl = (Get-Partition -DiskNumber {self._disk} -ErrorAction SilentlyContinue
-       | Where-Object {{ $_.DriveLetter }} | Select-Object -First 1).DriveLetter
-if (-not $dl) {{ exit }}
-$shell = New-Object -ComObject Shell.Application
-$shell.Windows() | ForEach-Object {{
-    try {{
-        $p = $_.Document.Folder.Self.Path
-        if ($p -eq "$dl`:\\" -or $p -like "*$dl*") {{ $_.Quit() }}
-    }} catch {{}}
-}}
-'''],
-                capture_output=True, text=True, timeout=15,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-        except Exception:
-            pass
-
-    def _clean_disk_linux(self) -> bool:
-        import time
-        device = self._get_linux_device()
-        if not device:
-            self._log('Could not determine Linux device path')
-            return False
-        self._log(f'Cleaning device: {device}')
-        try:
-            wipefs_result = subprocess.run(
-                ['wipefs', '-a', device],
-                capture_output=True, text=True, timeout=30,
-            )
-            if wipefs_result.stdout:
-                self._log(wipefs_result.stdout.strip())
-            if wipefs_result.stderr:
-                self._log(wipefs_result.stderr.strip())
-        except Exception as e:
-            self._log(f'wipefs failed (may not be installed): {e}')
-
-        try:
-            with open(device, 'wb') as f:
-                f.write(b'\x00' * 1048576)
-            self._log('Zeroed first 1MB of device')
-        except Exception as e:
-            self._log(f'Error zeroing device: {e}')
-            return False
-
-        time.sleep(1)
-        self._log('Device cleaned successfully')
-        return True
-
-    def _get_linux_device(self) -> str:
-        if self._device_path:
-            return self._device_path
-        try:
-            result = subprocess.run(
-                ['lsblk', '-J', '-o', 'NAME,TYPE,TRAN'],
-                capture_output=True, text=True, timeout=10,
-            )
-            if result.returncode != 0:
-                return ''
-            import json
-            data = json.loads(result.stdout)
-            usb = [d for d in data.get('blockdevices', [])
-                   if d.get('TYPE') == 'disk' and d.get('TRAN') == 'usb']
-            if self._disk < len(usb):
-                return f'/dev/{usb[self._disk]["NAME"]}'
-        except Exception as e:
-            self._log(f'lsblk lookup failed: {e}')
-        return f'/dev/sd{chr(97 + self._disk)}'
-
-    def _prepare_and_format_fat32(self) -> str:
-        import time
-        import re
-
-        if self._system != 'Windows':
-            self._log('FAT32 preparation is Windows-only')
-            return ''
-
-        self._log('Cleaning and formatting disk as FAT32 for UEFI boot...')
-        self.progress.emit('Formatting disk (FAT32)...')
-
-        if not self._clean_disk_windows():
-            self._log('Failed to clean disk before FAT32 format')
-            return ''
-
-        try:
-            script = (
-                f'select disk {self._disk}\n'
-                f'create partition primary\n'
-                f'select partition 1\n'
-                f'active\n'
-                f'format fs=fat32 label="WINUSB" quick\n'
-                f'assign\n'
+            clean_script = (
+                f'select disk {disk_number}\n'
+                f'clean\n'
                 f'exit\n'
             )
             result = subprocess.run(
                 ['diskpart'],
-                input=script,
-                capture_output=True, text=True, timeout=120,
+                input=clean_script,
+                capture_output=True, text=True, timeout=30,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
-            out = result.stdout.strip()
-            if out:
-                for line in out.splitlines():
-                    self._log(f'  diskpart: {line.strip()}')
-            if 'Access is denied' in out:
-                self._log('ERROR: Access denied - please run as administrator')
-                self.progress.emit('ERROR: Run as administrator')
-                return ''
-            if 'DiskPart has encountered an error' in out or result.returncode != 0:
-                self._log('diskpart format failed')
-                return ''
-
-            time.sleep(3)
-
-            ps_cmd = (
-                f'$parts = Get-Partition -DiskNumber {self._disk} '
-                f'-ErrorAction SilentlyContinue; '
-                f'foreach ($p in $parts) {{ '
-                f'if ($p.DriveLetter -and $p.DriveLetter -ne [char]0) {{ '
-                f'Write-Output $p.DriveLetter; break }} '
-                f'}}'
-            )
-            pr = subprocess.run(
-                ['powershell', '-NoProfile', '-Command', ps_cmd],
-                capture_output=True, text=True, timeout=15,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            letter = pr.stdout.strip()[:1]
-            if letter and letter.isalpha():
-                return letter.upper()
-
-            match = re.search(r'assigned.*?(\w):', out, re.IGNORECASE)
-            if not match:
-                match = re.search(r'Drive letter (\w)', out, re.IGNORECASE)
-            if match:
-                return match.group(1).upper()
-
-            self._log('Could not determine drive letter')
-            return ''
-        except subprocess.TimeoutExpired:
-            self._log('diskpart format timed out')
-        except Exception as e:
-            self._log(f'Error formatting disk: {e}')
-        return ''
-
-    def _refresh_disk(self):
-        try:
-            ps_cmd = f'Get-Disk -Number {self._disk} | Update-Disk -ErrorAction SilentlyContinue'
-            subprocess.run(
-                ['powershell', '-NoProfile', '-Command', ps_cmd],
-                capture_output=True, text=True, timeout=15,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-        except Exception:
-            pass
-
-    def _hide_drive_ui(self, drive_letter: str, reopen_explorer: bool = False):
-        if reopen_explorer:
-            try:
-                subprocess.Popen(
-                    ['explorer', f'{drive_letter}:\\'],
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-            except Exception:
-                pass
-            return
-        hide_drive_ui(self._disk, drive_letter)
-
-    def _flash_windows_iso(self) -> bool:
-        import time
-
-        drive_letter = self._prepare_and_format_fat32()
-        if not drive_letter:
-            self._log('Failed to format disk as FAT32')
-            return False
-
-        self._log(f'USB formatted as FAT32 on drive {drive_letter}:')
-        time.sleep(2)
-
-        self.progress.emit('Mounting ISO...')
-        self._log(f'Mounting ISO: {self._iso}')
-        iso_path_escaped = self._iso.replace("'", "''")
-        mount_cmd = (
-            f"$iso = Mount-DiskImage -ImagePath '{iso_path_escaped}' -PassThru; "
-            f"if ($iso) {{ Write-Output ('MOUNT:' + $iso.ImagePath) }} "
-            f"else {{ Write-Output 'MOUNT:FAIL' }}"
-        )
-        mount_result = subprocess.run(
-            ['powershell', '-NoProfile', '-Command', mount_cmd],
-            capture_output=True, text=True, timeout=30,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        mount_out = mount_result.stdout.strip()
-        if 'MOUNT:FAIL' in mount_out or mount_result.returncode != 0:
-            self._log(f'Failed to mount ISO: {mount_result.stderr.strip()}')
-            return False
-        self._log('ISO mounted successfully')
-        time.sleep(2)
-
-        try:
-            ps_cmd = (
-                "$vol = Get-Volume | Where-Object { $_.DriveType -eq 'CD-ROM' -and $_.DriveLetter } "
-                "| Sort-Object -Property DriveLetter -Descending | Select-Object -First 1; "
-                "if ($vol) { Write-Output $vol.DriveLetter } else { Write-Output 'NONE' }"
-            )
-            vol_result = subprocess.run(
-                ['powershell', '-NoProfile', '-Command', ps_cmd],
-                capture_output=True, text=True, timeout=15,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            iso_letter = vol_result.stdout.strip()[:1]
-            if not iso_letter or not iso_letter.isalpha() or iso_letter.upper() == 'N':
-                self._log('Could not find mounted ISO drive letter')
-                return False
-            self._log(f'ISO mounted on drive {iso_letter}:')
-
-            self.progress.emit('Copying Windows files to USB...')
-            self._log(f'Copying from {iso_letter}:\\ to {drive_letter}:\\ (excluding install.wim)')
-
-            copy_cmd = (
-                f'robocopy "{iso_letter}:\\" "{drive_letter}:\\" /E /R:1 /W:1 '
-                f'/XF install.wim install.esd /NFL /NDL /NJH /NJS /nc /ns /np'
-            )
-            copy_result = subprocess.run(
-                ['powershell', '-NoProfile', '-Command', copy_cmd],
-                capture_output=True, text=True, timeout=3600,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            if copy_result.returncode >= 8:
-                self._log(f'File copy failed (robocopy exit code {copy_result.returncode})')
-                return False
-            self._log('Base files copied successfully')
-
-            self.progress.emit('Processing install.wim...')
-            wim_path = f'{iso_letter}:\\sources\\install.wim'
-            esd_path = f'{iso_letter}:\\sources\\install.esd'
-
-            check_wim_cmd = f'if (Test-Path "{wim_path}") {{ Write-Output "EXISTS" }} else {{ Write-Output "NO" }}'
-            wim_check = subprocess.run(
-                ['powershell', '-NoProfile', '-Command', check_wim_cmd],
-                capture_output=True, text=True, timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            has_wim = 'EXISTS' in wim_check.stdout
-
-            check_esd_cmd = f'if (Test-Path "{esd_path}") {{ Write-Output "EXISTS" }} else {{ Write-Output "NO" }}'
-            esd_check = subprocess.run(
-                ['powershell', '-NoProfile', '-Command', check_esd_cmd],
-                capture_output=True, text=True, timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            has_esd = 'EXISTS' in esd_check.stdout
-
-            if has_wim:
-                self._log('Found install.wim, checking size...')
-                size_cmd = f'(Get-Item "{wim_path}").Length'
-                size_result = subprocess.run(
-                    ['powershell', '-NoProfile', '-Command', size_cmd],
-                    capture_output=True, text=True, timeout=10,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-                wim_size = int(size_result.stdout.strip()) if size_result.stdout.strip().isdigit() else 0
-                self._log(f'install.wim size: {wim_size} bytes ({wim_size / (1024*1024*1024):.2f} GB)')
-
-                if wim_size > 4 * 1024 * 1024 * 1024:
-                    self._log('install.wim > 4GB, splitting for FAT32...')
-                    self.progress.emit('Splitting install.wim for FAT32...')
-                    split_cmd = (
-                        f'Dism /Split-Image /ImageFile:"{wim_path}" '
-                        f'/SWMFile:"{drive_letter}:\\sources\\install.swm" /FileSize:3800'
-                    )
-                    split_result = subprocess.run(
-                        ['powershell', '-NoProfile', '-Command', split_cmd],
-                        capture_output=True, text=True, timeout=1800,
-                        creationflags=subprocess.CREATE_NO_WINDOW,
-                    )
-                    if split_result.returncode != 0:
-                        dism_err = split_result.stderr.strip()
-                        dism_out = split_result.stdout.strip()
-                        self._log(f'DISM split failed (code {split_result.returncode})')
-                        if dism_out:
-                            for line in dism_out.splitlines():
-                                self._log(f'  DISM: {line.strip()}')
-                        if dism_err:
-                            for line in dism_err.splitlines():
-                                self._log(f'  DISM err: {line.strip()}')
-                        return False
-                    self._log('install.wim split into .swm files successfully')
-                else:
-                    self._log('install.wim <= 4GB, copying directly...')
-                    self.progress.emit('Copying install.wim...')
-                    copy_wim_cmd = f'Copy-Item "{wim_path}" "{drive_letter}:\\sources\\install.wim"'
-                    copy_wim_result = subprocess.run(
-                        ['powershell', '-NoProfile', '-Command', copy_wim_cmd],
-                        capture_output=True, text=True, timeout=1800,
-                        creationflags=subprocess.CREATE_NO_WINDOW,
-                    )
-                    if copy_wim_result.returncode != 0:
-                        self._log(f'Failed to copy install.wim: {copy_wim_result.stderr.strip()}')
-                        return False
-                    self._log('install.wim copied successfully')
-
-            elif has_esd:
-                self._log('Found install.esd, copying directly...')
-                self.progress.emit('Copying install.esd...')
-                copy_esd_cmd = f'Copy-Item "{esd_path}" "{drive_letter}:\\sources\\install.esd"'
-                copy_esd_result = subprocess.run(
-                    ['powershell', '-NoProfile', '-Command', copy_esd_cmd],
-                    capture_output=True, text=True, timeout=1800,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-                if copy_esd_result.returncode != 0:
-                    self._log(f'Failed to copy install.esd: {copy_esd_result.stderr.strip()}')
-                    return False
-                self._log('install.esd copied successfully')
-            elif self._is_winpe_iso():
-                self._log('WinPE ISO: only boot.wim present, skipped install.wim/esd')
-            else:
-                self._log('No install.wim or install.esd found (may be WinPE)')
-
-            self._log('All files copied successfully to USB')
-            self.progress.emit('Files copied!')
-            self._hide_drive_ui(drive_letter)
-            return True
-        finally:
-            self.progress.emit('Cleaning up...')
-            dismount_cmd = (
-                f"Dismount-DiskImage -ImagePath '{iso_path_escaped}' -ErrorAction SilentlyContinue"
-            )
-            try:
-                subprocess.run(
-                    ['powershell', '-NoProfile', '-Command', dismount_cmd],
-                    capture_output=True, text=True, timeout=15,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-            except Exception:
-                pass
-            self._refresh_disk()
-
-    def _flash_linux_iso(self) -> bool:
-        if not self._clean_disk():
-            self._log('Failed to clean disk')
-            return False
-
-        self._log(f'Writing ISO (raw): {self._iso}')
-        self.progress.emit('Writing ISO to disk...')
-
-        try:
-            import platform as _platform
-            sys_name = _platform.system()
-            iso_size = os.path.getsize(self._iso)
-
-            if sys_name == 'Windows':
-                device = rf'\\.\PhysicalDrive{self._disk}'
-                self._log('Writing via raw sector copy...')
-                ps_code = (
-                    f"$path = @\"\n{self._iso}\n\"@; "
-                    f"$dev = @\"\n{device}\n\"@; "
-                    f"$size = (Get-Item $path).Length; "
-                    f"$stream = [System.IO.File]::Open($dev, "
-                    f"[System.IO.FileMode]::Open, [System.IO.FileAccess]::Write, "
-                    f"[System.IO.FileShare]::ReadWrite); "
-                    f"try {{ "
-                    f"  $iso = [System.IO.File]::OpenRead($path); "
-                    f"  try {{ "
-                    f"    $buf = New-Object byte[] 1048576; "
-                    f"    $total = 0; "
-                    f"    while (($read = $iso.Read($buf, 0, $buf.Length)) -gt 0) {{ "
-                    f"      $stream.Write($buf, 0, $read); "
-                    f"      $total += $read; "
-                    f"      Write-Output (\"PROGRESS:\" + [int]($total * 100 / $size)); "
-                    f"    }} "
-                    f"  }} finally {{ $iso.Close() }} "
-                    f"}} finally {{ $stream.Close() }} "
-                    f"Write-Output \"DONE\""
-                )
-                result = subprocess.run(
-                    ['powershell', '-NoProfile', '-Command', ps_code],
-                    capture_output=True, text=True, timeout=3600,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-                for line in result.stdout.splitlines():
-                    line = line.strip()
-                    if line.startswith('PROGRESS:'):
-                        pct = int(line.split(':')[1])
-                        self.progress.emit(f'Writing ISO... {pct}%')
-                        self._log(f'Written: {pct}%')
-                    elif line == 'DONE':
-                        self._log('ISO write completed')
-                stderr = result.stderr.strip()
-                if stderr:
-                    self._log(f'PowerShell stderr: {stderr}')
-                if result.returncode != 0:
-                    self._log(f'PowerShell failed (code {result.returncode})')
-                    return False
-                self._refresh_disk()
-                self.progress.emit('ISO written successfully!')
-                self._hide_drive_ui('')
-                try:
-                    subprocess.run(
-                        ['powershell', '-NoProfile', '-Command',
-                         f'Get-Partition -DiskNumber {self._disk} -ErrorAction SilentlyContinue '
-                         f'| Where-Object {{ $_.DriveLetter }} '
-                         f'| ForEach-Object {{ '
-                         f'  Remove-PartitionAccessPath -DiskNumber {self._disk} '
-                         f'    -PartitionNumber $_.PartitionNumber '
-                         f"    -AccessPath \"$($_.DriveLetter):\\\" -ErrorAction SilentlyContinue; "
-                         f'}} ; '
-                         f'Set-Disk -Number {self._disk} -IsOffline $true -ErrorAction SilentlyContinue'],
-                        capture_output=True, text=True, timeout=30,
-                        creationflags=subprocess.CREATE_NO_WINDOW,
-                    )
-                except Exception:
-                    pass
-                return True
-
-            else:
-                device = self._get_linux_device()
-                if not device:
-                    self._log('Could not determine Linux device path')
-                    return False
-                self._log(f'Writing to device: {device}')
-                self._log(f'ISO size: {iso_size} bytes')
-                self._log('Writing via direct block copy...')
-                chunk_size = 1024 * 1024
-                written = 0
-                last_pct = -1
-                with open(self._iso, 'rb') as src, open(device, 'wb') as dst:
-                    while True:
-                        chunk = src.read(chunk_size)
-                        if not chunk:
-                            break
-                        dst.write(chunk)
-                        written += len(chunk)
-                        pct = int(written * 100 / iso_size)
-                        if pct != last_pct:
-                            self.progress.emit(f'Writing ISO... {pct}%')
-                            self._log(f'Written: {pct}%')
-                            last_pct = pct
+            if 'DiskPart succeeded in cleaning the disk' in result.stdout:
+                self._log('Disk cleaned (partition table wiped), waiting for lock release...')
                 import time
-                time.sleep(2)
-                self._log('ISO write completed')
-                self.progress.emit('ISO written successfully!')
-                return True
-
-        except subprocess.TimeoutExpired:
-            self._log('ISO write timed out')
+                time.sleep(3)
+            else:
+                self._log(f'diskpart clean: {result.stdout.strip()[:200]}')
         except Exception as e:
-            self._log(f'Error writing ISO: {e}')
-            import traceback
-            self._log(traceback.format_exc())
-
-        return False
-
-    def _flash_iso(self) -> bool:
-        is_win = self._is_windows_iso()
-        is_pe = self._is_winpe_iso() if is_win else False
-
-        if self._system == 'Windows' and (is_win or is_pe):
-            if is_pe:
-                self._log('Detected WinPE ISO - using mount and copy method (Windows)')
-            else:
-                self._log('Detected Windows Setup ISO - using mount and copy method (Windows)')
-            return self._flash_windows_iso()
-        else:
-            if is_win or is_pe:
-                self._log(f'Detected Windows/PE ISO - using raw write method ({self._system})')
-            else:
-                self._log(f'Detected Linux/hybrid ISO - using raw write method ({self._system})')
-            return self._flash_linux_iso()
+            self._log(f'Disk prep warning: {e}')
 
 
-def is_windows_iso(iso_path: str) -> bool:
+def get_exe_architecture(exe_path: str) -> str:
     try:
-        import zipfile
-        if zipfile.is_zipfile(iso_path):
-            with zipfile.ZipFile(iso_path, 'r') as zf:
-                names_lower = [n.lower().replace('\\', '/') for n in zf.namelist()]
-                for marker in ('sources/install.wim', 'sources/install.esd',
-                               'boot/bootmgr', 'bootmgr', 'setup.exe'):
-                    if any(n == marker or n.endswith('/' + marker) for n in names_lower):
-                        return True
-                return False
+        with open(exe_path, 'rb') as f:
+            f.seek(0x3C)
+            pe_offset = struct.unpack('<I', f.read(4))[0]
+            f.seek(pe_offset + 4)
+            machine = struct.unpack('<H', f.read(2))[0]
+        return {0x014C: 'x86', 0x8664: 'x64', 0xAA64: 'ARM64'}.get(machine, 'unknown')
     except Exception:
-        pass
-    try:
-        with open(iso_path, 'rb') as f:
-            f.seek(0x8001)
-            magic = f.read(5)
-            if magic == b'CD001':
-                f.seek(0)
-                header = f.read(8388608)
-                markers = (b'INSTALL.WIM', b'INSTALL.ESD', b'install.wim',
-                           b'install.esd', b'BOOTMGR', b'bootmgr',
-                           b'SETUP.EXE', b'setup.exe',
-                           b'BOOT.WIM', b'boot.wim',
-                           b'WINSETUP', b'WinSetup',
-                           b'\\SOURCES\\', b'\\sources\\',
-                           b'/SOURCES/', b'/sources/')
-                for marker in markers:
-                    if marker in header:
-                        return True
+        return 'unknown'
+
+
+class RufusFlashWorker(QThread):
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(bool, str)
+    log = pyqtSignal(str)
+
+    def __init__(self, rufus_exe: str):
+        super().__init__()
+        self._rufus_exe = rufus_exe
+        self._log_path = ''
+
+    def _log(self, msg: str):
+        self.log.emit(msg)
+        if self._log_path:
+            ts = datetime.datetime.now().strftime('%H:%M:%S')
+            try:
+                with open(self._log_path, 'a', encoding='utf-8') as f:
+                    f.write(f'[{ts}] {msg}\n')
+            except Exception:
+                pass
+
+    def run(self):
+        self._log_path = _create_log_file('rufus')
+        self._log(f'Rufus starting')
+        self._log(f'Log: {self._log_path}')
+
+        try:
+            ok = self._flash_rufus()
+            if ok:
+                self.progress.emit('Rufus completed successfully!')
+                self._log('Rufus completed successfully!')
+                self.finished.emit(True, f'Rufus completed.\nLog: {self._log_path}')
+            else:
+                self.finished.emit(False, f'Rufus failed.\nLog: {self._log_path}')
+        except Exception as e:
+            self._log(f'Exception: {e}')
+            self.finished.emit(False, str(e))
+
+    def _flash_rufus(self) -> bool:
+        args = [self._rufus_exe, '-gpt']
+
+        cmd_str = ' '.join(args)
+        self._log(f'Running: {cmd_str}')
+        self.progress.emit('Launching Rufus...')
+
+        import time
+        try:
+            proc = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            while proc.poll() is None:
+                if self.isInterruptionRequested():
+                    proc.terminate()
+                    self._log('Rufus was cancelled')
+                    return False
+                time.sleep(0.5)
+
+            stdout = proc.stdout.read().strip() if proc.stdout else ''
+            stderr = proc.stderr.read().strip() if proc.stderr else ''
+            if stdout:
+                for line in stdout.splitlines():
+                    self._log(line)
+            if stderr:
+                self._log(f'STDERR: {stderr}')
+
+            if proc.returncode == 0:
+                self._log('Rufus completed successfully')
+                return True
+            else:
+                self._log(f'Rufus exited with code {proc.returncode}')
                 return False
-    except Exception:
-        pass
-    return False
+        except FileNotFoundError:
+            self._log(f'Rufus executable not found: {self._rufus_exe}')
+            return False
+        except Exception as e:
+            self._log(f'Error running Rufus: {e}')
+            return False
 
 
 def create_flash_worker(disk_number: int) -> VentoyFlashWorker:
@@ -1059,5 +596,9 @@ def create_deploy_worker(disk_number: int, data_mount: str, theme_name: str, the
     return VentoyDeployWorker(disk_number, data_mount, theme_name, theme_source)
 
 
-def create_iso_worker(disk_number: int, iso_path: str, device_path: str = '') -> IsoFlashWorker:
-    return IsoFlashWorker(disk_number, iso_path, device_path)
+def create_iso_flash_worker(iso_path: str, disk_number: int) -> IsoFlashWorker:
+    return IsoFlashWorker(iso_path, disk_number)
+
+
+def create_rufus_worker(rufus_exe: str) -> RufusFlashWorker:
+    return RufusFlashWorker(rufus_exe)

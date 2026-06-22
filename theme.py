@@ -68,7 +68,7 @@ DARK_COLORS = ThemeColors(
     mica_background="#202020",
     nav_hover_bg="rgba(255, 255, 255, 0.06)",
     nav_pressed_bg="rgba(255, 255, 255, 0.08)",
-    nav_selected_bg="#000000",
+    nav_selected_bg="#2D2D2D",
     progress_track="#505050",
     scrollbar_thumb="rgba(255, 255, 255, 0.15)",
     scrollbar_hover="rgba(255, 255, 255, 0.25)",
@@ -80,7 +80,7 @@ DARK_COLORS = ThemeColors(
 
 
 def build_stylesheet(c: ThemeColors) -> str:
-    nav_bg = "#000000" if c == DARK_COLORS else "#FFFFFF"
+    nav_bg = "#1A1A1A" if c == DARK_COLORS else "#FFFFFF"
     return f"""
 QMainWindow, QWidget {{
     background-color: {c.surface};

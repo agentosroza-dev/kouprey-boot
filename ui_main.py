@@ -16,7 +16,7 @@ from scanner import (
     list_usb_drives, list_available_themes,
     DriveInfo, ThemeInfo,
 )
-from worker import create_flash_worker, create_deploy_worker, create_iso_worker, rename_volume, is_windows_iso, show_drive_ui
+from worker import create_flash_worker, create_deploy_worker, create_iso_flash_worker, create_rufus_worker, rename_volume, show_drive_ui, get_exe_architecture
 
 
 PAGES = [
@@ -216,7 +216,9 @@ class FlashPage(QWidget):
         self._drive = None
         self._mode = ''
         self._deploy_worker = None
+        self._rufus_worker = None
         self._iso_worker = None
+        self._iso_path = ''
         self._build()
 
     def _build(self):
@@ -236,48 +238,237 @@ class FlashPage(QWidget):
         self._tabs = QTabWidget()
         self._tabs.setObjectName('flashTabs')
 
-        # --- Tab 1: ISO to USB ---
+        # --- Tab 0: ISO to Flash ---
         iso_tab = QWidget()
         iso_layout = QVBoxLayout(iso_tab)
         iso_layout.setContentsMargins(0, 16, 0, 0)
-        iso_layout.setSpacing(12)
+        iso_layout.setSpacing(16)
 
         iso_card = QFrame()
         iso_card.setObjectName('card')
         iso_card_layout = QVBoxLayout(iso_card)
-        iso_card_layout.setContentsMargins(24, 20, 24, 20)
-        iso_card_layout.setSpacing(12)
+        iso_card_layout.setContentsMargins(32, 32, 32, 32)
+        iso_card_layout.setSpacing(20)
 
+        title_row = QHBoxLayout()
+        title_row.setSpacing(10)
+        title_icon = QLabel()
+        title_icon.setPixmap(lucide_icon('zap', 22, '#000000').pixmap(22, 22))
+        title_row.addWidget(title_icon)
         self._iso_title = QLabel(self._lang.get('iso_title'))
-        self._iso_title.setStyleSheet('font-size: 12pt; font-weight: 600;')
-        iso_card_layout.addWidget(self._iso_title)
+        self._iso_title.setStyleSheet('font-size: 15pt; font-weight: 700;')
+        title_row.addWidget(self._iso_title)
+        title_row.addStretch()
+        iso_card_layout.addLayout(title_row)
 
-        iso_sel_row = QHBoxLayout()
-        iso_sel_row.setSpacing(8)
-        self._iso_combo = QComboBox()
-        self._iso_combo.setMinimumHeight(36)
-        iso_sel_row.addWidget(self._iso_combo, 1)
-        self._btn_iso_browse = QPushButton(self._lang.get('iso_browse'))
-        self._btn_iso_browse.setObjectName('btn_accent')
-        self._btn_iso_browse.setFixedHeight(36)
-        self._btn_iso_browse.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        iso_sel_row.addWidget(self._btn_iso_browse)
-        iso_card_layout.addLayout(iso_sel_row)
+        self._iso_icon_title = title_icon
 
-        self._iso_info = QLabel('')
-        self._iso_info.setObjectName('statusLabel')
-        self._iso_info.setWordWrap(True)
-        iso_card_layout.addWidget(self._iso_info)
+        # --- ISO selection zone ---
+        iso_zone = QFrame()
+        iso_zone.setObjectName('isoZone')
+        iso_zone.setStyleSheet(
+            'QFrame#isoZone {'
+            '  background: #F8F8F8;'
+            '  border: 2px dashed #C0C0C0;'
+            '  border-radius: 12px;'
+            '}'
+            'QFrame#isoZone:hover {'
+            '  border-color: #888888;'
+            '  background: #F0F0F0;'
+            '}'
+        )
+        iso_zone.setCursor(Qt.CursorShape.PointingHandCursor)
+        iso_zone.mousePressEvent = lambda e: self._on_select_iso()
+        iso_zone_layout = QVBoxLayout(iso_zone)
+        iso_zone_layout.setContentsMargins(24, 20, 24, 20)
+        iso_zone_layout.setSpacing(8)
 
+        iso_zone_top = QHBoxLayout()
+        iso_zone_top.setSpacing(10)
+        iso_icon = QLabel()
+        iso_icon.setPixmap(lucide_icon('disc', 36, '#666666').pixmap(36, 36))
+        iso_zone_top.addWidget(iso_icon)
+
+        iso_zone_text = QVBoxLayout()
+        iso_zone_text.setSpacing(2)
+        sel_label = QLabel(self._lang.get('iso_drop_hint'))
+        sel_label.setStyleSheet('font-size: 12pt; font-weight: 600; color: #444444;')
+        iso_zone_text.addWidget(sel_label)
+        fmt_label = QLabel(self._lang.get('iso_drop_format'))
+        fmt_label.setStyleSheet('font-size: 9pt; color: #999999;')
+        iso_zone_text.addWidget(fmt_label)
+        iso_zone_top.addLayout(iso_zone_text)
+        iso_zone_top.addStretch()
+
+        self._btn_select_iso = QPushButton(self._lang.get('iso_select_btn'))
+        self._btn_select_iso.setObjectName('btn_accent')
+        self._btn_select_iso.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_select_iso.setFixedHeight(34)
+        self._btn_select_iso.setFixedWidth(120)
+        self._btn_select_iso.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_select_iso.clicked.connect(self._on_select_iso)
+        iso_zone_top.addWidget(self._btn_select_iso)
+
+        iso_zone_layout.addLayout(iso_zone_top)
+
+        self._iso_info_bar = QFrame()
+        self._iso_info_bar.setStyleSheet(
+            'background: #FFFFFF; border-radius: 8px; padding: 4px;'
+        )
+        self._iso_info_bar.setVisible(False)
+        info_bar_layout = QHBoxLayout(self._iso_info_bar)
+        info_bar_layout.setContentsMargins(12, 8, 12, 8)
+        info_bar_layout.setSpacing(8)
+
+        self._iso_path_label = QLabel(self._lang.get('iso_no_iso'))
+        self._iso_path_label.setObjectName('statusLabel')
+        self._iso_path_label.setWordWrap(True)
+        self._iso_path_label.setStyleSheet('font-size: 10pt; font-weight: 500;')
+        info_bar_layout.addWidget(self._iso_path_label, 1)
+
+        self._iso_size_label = QLabel('')
+        self._iso_size_label.setObjectName('statusLabel')
+        self._iso_size_label.setVisible(False)
+        self._iso_size_label.setStyleSheet(
+            'font-size: 10pt; font-weight: 600; background: #EEEEEE;'
+            'border-radius: 4px; padding: 2px 8px;'
+        )
+        info_bar_layout.addWidget(self._iso_size_label)
+
+        iso_zone_layout.addWidget(self._iso_info_bar)
+        iso_card_layout.addWidget(iso_zone)
+
+        # --- Drive selection zone ---
+        drive_section = QFrame()
+        drive_section.setStyleSheet(
+            'QFrame { background: #F8F8F8; border: 1px solid #E0E0E0; border-radius: 12px; }'
+        )
+        drive_section_layout = QVBoxLayout(drive_section)
+        drive_section_layout.setContentsMargins(20, 16, 20, 16)
+        drive_section_layout.setSpacing(10)
+
+        drive_top = QHBoxLayout()
+        drive_top.setSpacing(8)
+        drive_icon = QLabel()
+        drive_icon.setPixmap(lucide_icon('hard-drive', 20, '#666666').pixmap(20, 20))
+        drive_top.addWidget(drive_icon)
+        self._iso_target_label = QLabel(self._lang.get('iso_target_drive'))
+        self._iso_target_label.setStyleSheet('font-size: 11pt; font-weight: 600; color: #444444;')
+        drive_top.addWidget(self._iso_target_label)
+        drive_top.addStretch()
+        drive_section_layout.addLayout(drive_top)
+
+        drive_row = QHBoxLayout()
+        drive_row.setSpacing(8)
+        self._iso_drive_combo = QComboBox()
+        self._iso_drive_combo.setMinimumHeight(40)
+        self._iso_drive_combo.currentIndexChanged.connect(self._on_iso_drive_changed)
+        drive_row.addWidget(self._iso_drive_combo, 1)
+
+        self._btn_iso_drive_refresh = QPushButton()
+        self._btn_iso_drive_refresh.setObjectName('btn_icon')
+        self._btn_iso_drive_refresh.setIcon(lucide_icon('refresh-cw', 16, '#616161'))
+        self._btn_iso_drive_refresh.setFixedSize(40, 40)
+        self._btn_iso_drive_refresh.setToolTip(self._lang.get('btn_refresh'))
+        self._btn_iso_drive_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_iso_drive_refresh.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        drive_row.addWidget(self._btn_iso_drive_refresh)
+        drive_section_layout.addLayout(drive_row)
+
+        iso_card_layout.addWidget(drive_section)
+
+        # --- Size comparison ---
+        self._iso_compare_label = QLabel('')
+        self._iso_compare_label.setObjectName('statusLabel')
+        self._iso_compare_label.setStyleSheet(
+            'font-size: 11pt; padding: 10px 16px; border-radius: 8px;'
+        )
+        self._iso_compare_label.setVisible(False)
+        self._iso_compare_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._iso_compare_label.setMinimumHeight(36)
+        iso_card_layout.addWidget(self._iso_compare_label)
+
+        # --- Flash button ---
         self._btn_flash_iso = QPushButton(self._lang.get('iso_flash_btn'))
         self._btn_flash_iso.setObjectName('btn_accent')
         self._btn_flash_iso.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._btn_flash_iso.setIcon(lucide_icon('zap', 16, '#ffffff'))
+        self._btn_flash_iso.setEnabled(False)
+        self._btn_flash_iso.setFixedHeight(48)
+        self._btn_flash_iso.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_flash_iso.setStyleSheet(
+            'QPushButton#btn_accent { font-size: 13pt; font-weight: 700; }'
+        )
         iso_card_layout.addWidget(self._btn_flash_iso)
 
         iso_layout.addWidget(iso_card)
         iso_layout.addStretch()
         self._tabs.addTab(iso_tab, self._lang.get('tab_iso'))
+
+        # --- Tab 1: Rufus ---
+        rufus_tab = QWidget()
+        rufus_layout = QVBoxLayout(rufus_tab)
+        rufus_layout.setContentsMargins(0, 16, 0, 0)
+        rufus_layout.setSpacing(12)
+
+        rufus_card = QFrame()
+        rufus_card.setObjectName('card')
+        rufus_card_layout = QVBoxLayout(rufus_card)
+        rufus_card_layout.setContentsMargins(24, 20, 24, 20)
+        rufus_card_layout.setSpacing(12)
+
+        self._rufus_title = QLabel(self._lang.get('rufus_title'))
+        self._rufus_title.setStyleSheet('font-size: 12pt; font-weight: 600;')
+        rufus_card_layout.addWidget(self._rufus_title)
+
+        status_row = QHBoxLayout()
+        status_row.setSpacing(8)
+
+        self._rufus_status_icon = QLabel()
+        self._rufus_status_icon.setFixedSize(20, 20)
+        status_row.addWidget(self._rufus_status_icon)
+
+        self._rufus_status_label = QLabel('')
+        self._rufus_status_label.setObjectName('statusLabel')
+        self._rufus_status_label.setWordWrap(True)
+        status_row.addWidget(self._rufus_status_label, 1)
+
+        self._rufus_arch_badge = QFrame()
+        self._rufus_arch_badge.setVisible(False)
+        self._rufus_arch_badge.setStyleSheet(
+            'background: #E8E8E8; border: 1px solid #C0C0C0; border-radius: 4px; padding: 2px 8px;'
+        )
+        badge_layout = QVBoxLayout(self._rufus_arch_badge)
+        badge_layout.setContentsMargins(0, 0, 0, 0)
+        self._rufus_arch_badge_label = QLabel('')
+        self._rufus_arch_badge_label.setStyleSheet(
+            'font-size: 9pt; font-weight: 700; color: #333333; background: transparent;'
+        )
+        badge_layout.addWidget(self._rufus_arch_badge_label)
+        status_row.addWidget(self._rufus_arch_badge)
+
+        self._btn_rufus_refresh = QPushButton()
+        self._btn_rufus_refresh.setObjectName('btn_icon')
+        self._btn_rufus_refresh.setIcon(lucide_icon('refresh-cw', 16, '#616161'))
+        self._btn_rufus_refresh.setFixedSize(32, 32)
+        self._btn_rufus_refresh.setToolTip(self._lang.get('btn_refresh'))
+        self._btn_rufus_refresh.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_rufus_refresh.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        status_row.addWidget(self._btn_rufus_refresh)
+
+        rufus_card_layout.addLayout(status_row)
+
+        self._update_rufus_status()
+
+        self._btn_flash_rufus = QPushButton(self._lang.get('rufus_flash_btn'))
+        self._btn_flash_rufus.setObjectName('btn_accent')
+        self._btn_flash_rufus.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_flash_rufus.setIcon(lucide_icon('zap', 16, '#ffffff'))
+        rufus_card_layout.addWidget(self._btn_flash_rufus)
+
+        rufus_layout.addWidget(rufus_card)
+        rufus_layout.addStretch()
+        self._tabs.addTab(rufus_tab, self._lang.get('tab_rufus'))
 
         # --- Tab 2: Ventoy to USB ---
         ventoy_tab = QWidget()
@@ -322,7 +513,7 @@ class FlashPage(QWidget):
 
         layout.addWidget(self._tabs)
 
-        # Shared progress bar (outside tabs, visible for both ISO and Ventoy)
+        # Shared progress bar (outside tabs, visible for both Rufus and Ventoy)
         progress_row = QHBoxLayout()
         progress_row.setSpacing(10)
         self._progress = QProgressBar()
@@ -361,43 +552,180 @@ class FlashPage(QWidget):
         layout.addStretch()
 
         self._btn_flash.clicked.connect(self._on_flash)
-        self._btn_iso_browse.clicked.connect(self._on_iso_browse)
+        self._btn_flash_rufus.clicked.connect(self._on_flash_rufus)
+        self._btn_rufus_refresh.clicked.connect(self._update_rufus_status)
         self._btn_flash_iso.clicked.connect(self._on_flash_iso)
+        self._btn_iso_drive_refresh.clicked.connect(self._populate_iso_drives)
 
     def set_accent_icon_color(self, color: str):
         self._btn_flash.setIcon(lucide_icon('zap', 16, color))
+        self._btn_flash_rufus.setIcon(lucide_icon('zap', 16, color))
         self._btn_flash_iso.setIcon(lucide_icon('zap', 16, color))
 
-    def _on_iso_browse(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, self._lang.get('iso_select'), '',
-            self._lang.get('iso_file_filter')
-        )
-        if path:
-            self._iso_combo.addItem(path, path)
-            self._iso_combo.setCurrentIndex(self._iso_combo.count() - 1)
-            self._update_iso_info(path)
+    def _update_rufus_status(self):
+        exe_path = self._find_rufus_exe()
+        if exe_path:
+            self._rufus_exe_path = exe_path
+            self._rufus_status_icon.setPixmap(
+                lucide_icon('check-circle', 20, '#16A34A').pixmap(20, 20)
+            )
+            self._rufus_status_label.setText(exe_path)
+            arch = get_exe_architecture(exe_path)
+            self._rufus_arch_badge.setVisible(True)
+            label = arch.upper() if arch != 'unknown' else self._lang.get('rufus_arch_unknown')
+            self._rufus_arch_badge_label.setText(label)
+            if arch == 'x64':
+                self._rufus_arch_badge.setStyleSheet(
+                    'background: #DCFCE7; border: 1px solid #86EFAC; border-radius: 4px; padding: 2px 8px;'
+                )
+                self._rufus_arch_badge_label.setStyleSheet(
+                    'font-size: 9pt; font-weight: 700; color: #15803D; background: transparent;'
+                )
+            elif arch == 'x86':
+                self._rufus_arch_badge.setStyleSheet(
+                    'background: #FEF3C7; border: 1px solid #FCD34D; border-radius: 4px; padding: 2px 8px;'
+                )
+                self._rufus_arch_badge_label.setStyleSheet(
+                    'font-size: 9pt; font-weight: 700; color: #92400E; background: transparent;'
+                )
+            elif arch == 'ARM64':
+                self._rufus_arch_badge.setStyleSheet(
+                    'background: #DBEAFE; border: 1px solid #93C5FD; border-radius: 4px; padding: 2px 8px;'
+                )
+                self._rufus_arch_badge_label.setStyleSheet(
+                    'font-size: 9pt; font-weight: 700; color: #1E40AF; background: transparent;'
+                )
+            else:
+                self._rufus_arch_badge.setStyleSheet(
+                    'background: #F3F4F6; border: 1px solid #D1D5DB; border-radius: 4px; padding: 2px 8px;'
+                )
+                self._rufus_arch_badge_label.setStyleSheet(
+                    'font-size: 9pt; font-weight: 700; color: #6B7280; background: transparent;'
+                )
+        else:
+            self._rufus_exe_path = ''
+            self._rufus_status_icon.setPixmap(
+                lucide_icon('x-circle', 20, '#DC2626').pixmap(20, 20)
+            )
+            self._rufus_status_label.setText(self._lang.get('rufus_no_exe'))
+            self._rufus_arch_badge.setVisible(False)
 
-    def _update_iso_info(self, path: str):
-        self._iso_info.setText('')
+    def _find_rufus_exe(self) -> str:
+        import glob
+        base = getattr(sys, '_MEIPASS', os.path.dirname(__file__))
+        patterns = [
+            os.path.join(base, 'assets', 'rufus', '*', 'rufus*.exe'),
+            os.path.join(base, 'assets', 'rufus', 'rufus*.exe'),
+        ]
+        for pattern in patterns:
+            matches = glob.glob(pattern)
+            for m in matches:
+                if os.path.isfile(m):
+                    return os.path.abspath(m)
+        return ''
+
+    def _on_flash_rufus(self):
+        if not self._rufus_exe_path:
+            QMessageBox.warning(self, self._lang.get('warning'), self._lang.get('rufus_no_exe'))
+            return
+
+        self._start_rufus_flash()
+
+    def _populate_iso_drives(self):
+        self._iso_drive_combo.blockSignals(True)
+        self._iso_drive_combo.clear()
+        self._iso_drive_combo.addItem(self._lang.get('iso_select_drive'), -1)
+        drives = list_usb_drives(force_refresh=True)
+        for d in drives:
+            label = f'{d.model} ({d.size_gb}) \u2013 Disk #{d.number}'
+            if d.mount_point:
+                label += f' [{d.mount_point}]'
+            self._iso_drive_combo.addItem(label, d.number)
+        self._iso_drive_combo.blockSignals(False)
+        self._update_iso_flash_state()
+
+    def _on_iso_drive_changed(self, idx):
+        self._update_iso_flash_state()
+
+    def _update_iso_flash_state(self):
+        iso_ok = bool(self._iso_path)
+        drive_ok = self._iso_drive_combo.currentData() is not None and self._iso_drive_combo.currentData() != -1
+        self._btn_flash_iso.setEnabled(iso_ok and drive_ok)
+
+        if iso_ok and drive_ok:
+            iso_size = os.path.getsize(self._iso_path) / (1024 ** 3)
+            drive_num = self._iso_drive_combo.currentData()
+            drives = list_usb_drives()
+            drive_gb = 0
+            for d in drives:
+                if d.number == drive_num:
+                    drive_gb = d.size_bytes / (1024 ** 3)
+                    break
+            if drive_gb > 0:
+                ratio = drive_gb / iso_size if iso_size > 0 else 0
+                self._iso_compare_label.setText(
+                    f'ISO: {iso_size:.1f} GB  \u2192  Drive: {drive_gb:.1f} GB  ({ratio:.1f}x)'
+                )
+                self._iso_compare_label.setVisible(True)
+                if iso_size > drive_gb:
+                    self._iso_compare_label.setStyleSheet(
+                        'font-size: 11pt; padding: 10px 16px; border-radius: 8px;'
+                        'background: #FEE2E2; color: #DC2626; font-weight: 600;'
+                    )
+                else:
+                    self._iso_compare_label.setStyleSheet(
+                        'font-size: 11pt; padding: 10px 16px; border-radius: 8px;'
+                        'background: #F0FDF4; color: #15803D; font-weight: 600;'
+                    )
+            else:
+                self._iso_compare_label.setVisible(False)
+        else:
+            self._iso_compare_label.setVisible(False)
+
+    def _on_select_iso(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, self._lang.get('iso_select_btn'),
+            '', 'ISO Files (*.iso);;All Files (*)'
+        )
+        if path and os.path.isfile(path):
+            self._iso_path = path
+            self._iso_path_label.setText(f'{os.path.basename(path)}')
+            iso_size = os.path.getsize(path) / (1024 ** 3)
+            self._iso_size_label.setText(f'{iso_size:.1f} GB')
+            self._iso_size_label.setVisible(True)
+            self._iso_info_bar.setVisible(True)
+        else:
+            self._iso_path = ''
+            self._iso_path_label.setText(self._lang.get('iso_no_iso'))
+            self._iso_size_label.setVisible(False)
+            self._iso_info_bar.setVisible(False)
+        self._update_iso_flash_state()
 
     def _on_flash_iso(self):
-        if not self._drive:
+        if not self._iso_path:
+            QMessageBox.warning(self, self._lang.get('warning'), self._lang.get('iso_select_iso_first'))
+            return
+
+        drive_num = self._iso_drive_combo.currentData()
+        if drive_num is None or drive_num == -1:
             QMessageBox.warning(self, self._lang.get('warning'), self._lang.get('flash_select_drive_first'))
             return
 
-        iso_path = self._iso_combo.currentData()
-        if not iso_path:
-            QMessageBox.warning(self, self._lang.get('warning'), self._lang.get('iso_no_file'))
-            return
+        drives = list_usb_drives()
+        drive_model = f'Disk #{drive_num}'
+        drive_size = ''
+        for d in drives:
+            if d.number == drive_num:
+                drive_model = d.model
+                drive_size = d.size_gb
+                break
 
-        drive_info = f'{self._drive.model} ({self._drive.size_gb}) \u2013 {self._lang.get("disk_label")} #{self._drive.number}'
-        is_win = is_windows_iso(iso_path)
-        method = self._lang.get('iso_method_windows') if is_win else self._lang.get('iso_method_dd')
+        drive_info = f'{drive_model} ({drive_size}) \u2013 Disk #{drive_num}'
+        iso_name = os.path.basename(self._iso_path)
         msg = (
-            f'{self._lang.get("flash_erase_warning")}\n\n{drive_info}\n'
-            f'{iso_path}\n\n'
-            f'{self._lang.get("iso_method_label")}: {method}\n'
+            f'{self._lang.get("iso_erase_warning")}\n\n'
+            f'{iso_name}\n\n'
+            f'{self._lang.get("flash_erase_warning")}\n{drive_info}\n\n'
             f'{self._lang.get("flash_data_lost")}\n'
             f'{self._lang.get("flash_continue")}'
         )
@@ -407,11 +735,14 @@ class FlashPage(QWidget):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-
-        self._start_iso_flash()
+        QTimer.singleShot(0, self._start_iso_flash)
 
     def _start_iso_flash(self):
+        drive_num = self._iso_drive_combo.currentData()
         self._btn_flash_iso.setEnabled(False)
+        self._btn_select_iso.setEnabled(False)
+        self._iso_drive_combo.setEnabled(False)
+        self._btn_iso_drive_refresh.setEnabled(False)
         self._progress.setVisible(True)
         self._progress_label.setVisible(True)
         self._progress.setValue(0)
@@ -422,8 +753,7 @@ class FlashPage(QWidget):
             if w:
                 w.setParent(None)
 
-        iso_path = self._iso_combo.currentData()
-        self._iso_worker = create_iso_worker(self._drive.number, iso_path, self._drive.device_path)
+        self._iso_worker = create_iso_flash_worker(self._iso_path, drive_num)
         self._iso_worker.progress.connect(self._on_iso_progress)
         self._iso_worker.log.connect(self._log)
         self._iso_worker.finished.connect(self._on_iso_finished)
@@ -438,16 +768,58 @@ class FlashPage(QWidget):
 
     def _on_iso_finished(self, ok: bool, msg: str):
         self._btn_flash_iso.setEnabled(True)
+        self._btn_select_iso.setEnabled(True)
+        self._iso_drive_combo.setEnabled(True)
+        self._btn_iso_drive_refresh.setEnabled(True)
         self._progress.setValue(100 if ok else 0)
         self._progress_label.setText(
             self._lang.get('iso_complete') if ok else f'{self._lang.get("iso_failed")} - {msg}'
         )
+        QTimer.singleShot(5000, lambda: self._progress_label.setVisible(False))
+        QTimer.singleShot(5000, lambda: self._progress.setVisible(False))
+        if ok:
+            QMessageBox.information(self, self._lang.get('success'), self._lang.get('iso_complete'))
+            self._populate_iso_drives()
+        else:
+            QMessageBox.critical(self, self._lang.get('error'), f'{self._lang.get("iso_failed")}: {msg}')
+
+    def _start_rufus_flash(self):
+        self._btn_flash_rufus.setEnabled(False)
+        self._progress.setVisible(True)
+        self._progress_label.setVisible(True)
+        self._progress.setValue(0)
+        self._progress_label.setText(f'0% - {self._lang.get("rufus_flashing")}')
+
+        for i in reversed(range(self._log_area.count())):
+            w = self._log_area.itemAt(i).widget()
+            if w:
+                w.setParent(None)
+
+        self._rufus_worker = create_rufus_worker(self._rufus_exe_path)
+        self._rufus_worker.progress.connect(self._on_rufus_progress)
+        self._rufus_worker.log.connect(self._log)
+        self._rufus_worker.finished.connect(self._on_rufus_finished)
+        self._rufus_worker.start()
+
+    def _on_rufus_progress(self, msg: str):
+        self._progress_label.setText(msg)
+        import re
+        m = re.search(r'(\d+)%', msg)
+        if m:
+            self._progress.setValue(int(m.group(1)))
+
+    def _on_rufus_finished(self, ok: bool, msg: str):
+        self._btn_flash_rufus.setEnabled(True)
+        self._progress.setValue(100 if ok else 0)
+        self._progress_label.setText(
+            self._lang.get('rufus_complete') if ok else f'{self._lang.get("rufus_failed")} - {msg}'
+        )
         QTimer.singleShot(3000, lambda: self._progress_label.setVisible(False))
         QTimer.singleShot(3000, lambda: self._progress.setVisible(False))
         if ok:
-            QMessageBox.information(self, self._lang.get('success'), self._lang.get('iso_complete'))
+            QMessageBox.information(self, self._lang.get('success'), self._lang.get('rufus_complete'))
         else:
-            QMessageBox.critical(self, self._lang.get('error'), f'{self._lang.get("iso_failed")}: {msg}')
+            QMessageBox.critical(self, self._lang.get('error'), f'{self._lang.get("rufus_failed")}: {msg}')
 
     def set_drive(self, drive: DriveInfo):
         self._drive = drive
@@ -1133,6 +1505,7 @@ class KoupreyBootFlashWindow(QMainWindow):
             drives = list_usb_drives()
             if drives:
                 self._flash_page.set_drive(drives[0])
+            self._flash_page._populate_iso_drives()
         elif self._current_page == 'deploy':
             drives = list_usb_drives()
             if drives:
@@ -1209,12 +1582,20 @@ class KoupreyBootFlashWindow(QMainWindow):
         self._flash_page._page_title.setText(lang.get('flash_title'))
         self._flash_page._drive_info.setText(lang.get('flash_select'))
         self._flash_page._iso_title.setText(lang.get('iso_title'))
+        self._flash_page._iso_target_label.setText(lang.get('iso_target_drive'))
+        self._flash_page._rufus_title.setText(lang.get('rufus_title'))
         self._flash_page._log_title.setText(lang.get('log_title'))
-        self._flash_page._btn_flash.setText(lang.get('flash_btn'))
+        self._flash_page._btn_select_iso.setText(lang.get('iso_select_btn'))
         self._flash_page._btn_flash_iso.setText(lang.get('iso_flash_btn'))
-        self._flash_page._btn_iso_browse.setText(lang.get('iso_browse'))
+        self._flash_page._btn_flash.setText(lang.get('flash_btn'))
+        self._flash_page._btn_flash_rufus.setText(lang.get('rufus_flash_btn'))
         self._flash_page._tabs.setTabText(0, lang.get('tab_iso'))
-        self._flash_page._tabs.setTabText(1, lang.get('tab_ventoy'))
+        self._flash_page._tabs.setTabText(1, lang.get('tab_rufus'))
+        self._flash_page._tabs.setTabText(2, lang.get('tab_ventoy'))
+        self._flash_page._btn_rufus_refresh.setToolTip(lang.get('btn_refresh'))
+        self._flash_page._btn_iso_drive_refresh.setToolTip(lang.get('btn_refresh'))
+        self._flash_page._iso_drive_combo.setItemText(0, lang.get('iso_select_drive'))
+        self._flash_page._update_rufus_status()
         if self._flash_page._drive:
             self._flash_page.set_drive(self._flash_page._drive)
 
